@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+from app.repositories.repository import RedisRepository
 from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 from app.api.http import router as http_router
@@ -13,6 +14,7 @@ async def lifespan(app: FastAPI):
         decode_responses=True,  # bytes 대신 문자열로 반환
     )
     app.state.redis = client
+    app.state.repository = RedisRepository(client)
 
     try:
         await client.ping()
