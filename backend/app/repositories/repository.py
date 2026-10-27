@@ -121,6 +121,51 @@ class RedisRepository:
                 start=1,
             )
         ]
+        
+    
+    async def get_online_leaderboard(
+        self,
+        player_ids: list[str],
+    ) -> list[RankingEntry]:
+        if not player_ids:
+            return []
+
+        # 접속 중인 플레이어들의 점수만 한 번에 조회
+        scores = await self.redis.zmscore(
+            self.LEADERBOARD_KEY,
+            player_ids,
+        )
+
+        # 닉네임 조회 명령을 묶어서 전송
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for player_id in player_ids:
+                pipe.hget(f"player:{player_id}", "nickname")
+
+            nicknames = await pipe.execute()
+
+        players = [
+            {
+                "player_id": player_id,
+                "nickname": nickname if nickname is not None else "Unknown",
+                "score": int(score),
+            }
+            for player_id, score, nickname in zip(
+                player_ids, scores, nicknames
+            )
+            if score is not None
+        ]
+
+        # 점수 내림차순 정렬
+        # 동점이면 player_id 기준으로 순서를 고정
+        players.sort(
+            key=lambda player: (-player["score"], player["player_id"])
+        )
+
+        return [
+            {"rank": rank, **player}
+            for rank, player in enumerate(players, start=1)
+        ]
+        
 
     async def get_player_rank(self, player_id: str) -> int | None:
         """개인 순위 조회. 랭킹에 없으면 None 반환."""
