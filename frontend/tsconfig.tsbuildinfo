@@ -1,1 +1,1 @@
-{"root":["./src/game-service.ts","./src/main.tsx","./src/theme.ts"],"version":"5.7.3"}
+{"root":["./src/click-batcher.ts","./src/game-service.ts","./src/main.tsx","./src/theme.ts"],"version":"5.7.3"}

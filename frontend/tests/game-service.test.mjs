@@ -43,10 +43,10 @@ test('HTTP session and WebSocket game contract', async t => {
         return;
       }
       let reply;
-      if (message.type === 'click') {
-        player.score += player.level;
-        player.total_clicks++;
-        reply = { type: 'click_result', ...player };
+      if (message.type === 'click_batch') {
+        player.score += player.level * message.count;
+        player.total_clicks += message.count;
+        reply = { type: 'click_batch_result', success: true, accepted_clicks: message.count, ...player };
       } else if (player.score >= player.level * 100) {
         player.score -= player.level * 100;
         player.level++;
@@ -73,23 +73,23 @@ test('HTTP session and WebSocket game contract', async t => {
     assert.equal(requests.filter(request => request.path.startsWith('/api/players/')).length, 1);
   });
   await t.test('applies click and partial levelup responses with server upgrade cost', async () => {
-    assert.equal((await service.click()).gold, 151);
+    assert.equal((await service.click(1)).gold, 151);
     const upgraded = await service.upgrade();
     assert.equal(upgraded.gold, 51);
     assert.equal(upgraded.level, 2);
     assert.equal(upgraded.goldPerClick, 2);
     assert.equal(upgraded.upgradeCost, 200);
-    assert.equal((await service.click()).gold, 53);
-    assert.deepEqual(messages, [{ type: 'click' }, { type: 'levelup' }, { type: 'click' }]);
+    assert.equal((await service.click(1)).gold, 53);
+    assert.deepEqual(messages, [{ type: 'click_batch', count: 1 }, { type: 'levelup' }, { type: 'click_batch', count: 1 }]);
   });
   await t.test('reports insufficient gold and remains usable', async () => {
     await assert.rejects(service.upgrade(), /골드가 부족/);
-    assert.equal((await service.click()).gold, 55);
+    assert.equal((await service.click(1)).gold, 55);
   });
   await t.test('rejects interrupted input and reconnects without replaying it', async () => {
     dropNext = true;
     const before = messages.length;
-    await assert.rejects(service.click(), /연결이 끊겼/);
+    await assert.rejects(service.click(1), /연결이 끊겼/);
     const state = await service.getState();
     assert.equal(state.gold, 55);
     assert.equal(sockets.length, 2);
@@ -99,6 +99,16 @@ test('HTTP session and WebSocket game contract', async t => {
     httpFailure = true;
     await assert.rejects(service.getState(), /Redis 처리 실패/);
     httpFailure = false;
+  });
+  await t.test('sends ten clicks in one request and rejects invalid batch counts locally', async () => {
+    const before = messages.length;
+    assert.equal((await service.click(10)).gold, 75);
+    assert.equal(messages.length, before + 1);
+    assert.deepEqual(messages.at(-1), { type: 'click_batch', count: 10 });
+    for (const count of [0, 11, 1.5, '3', true, undefined]) {
+      await assert.rejects(service.click(count), /1~10/);
+    }
+    assert.equal(messages.length, before + 1);
   });
   await t.test('disposes the socket and prevents further requests', async () => {
     service.dispose();

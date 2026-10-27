@@ -1,6 +1,6 @@
 export interface Player { id: string; name: string; gold: number; rank: number }
 export interface GameState { playerId: string; gold: number; goldPerClick: number; upgradeCost: number; level: number; leaderboard: Player[]; ping: number | null }
-export interface GameService { getState(): Promise<GameState>; click(): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void }
+export interface GameService { getState(): Promise<GameState>; click(count: number): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void }
 
 interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number }
 interface Ranking { rank: number; player_id: string; nickname: string; score: number }
@@ -107,7 +107,7 @@ export function createApiGameService(nickname: string): GameService {
     finally { connecting = undefined; }
   }
 
-  async function action(type: 'click' | 'levelup'): Promise<GameState> {
+  async function action(type: 'click_batch' | 'levelup', count?: number): Promise<GameState> {
     await connect();
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -116,7 +116,7 @@ export function createApiGameService(nickname: string): GameService {
         socket = undefined;
       }, 10000);
       pending = { type: `${type}_result`, started: performance.now(), resolve, reject, timer };
-      try { socket!.send(JSON.stringify({ type })); }
+      try { socket!.send(JSON.stringify({ type, ...(count === undefined ? {} : { count }) })); }
       catch { rejectPending(new Error('요청을 전송할 수 없습니다.')); }
     });
     return snapshot();
@@ -134,7 +134,10 @@ export function createApiGameService(nickname: string): GameService {
         gold: entry.score, rank: entry.rank }));
       return snapshot();
     },
-    click: () => action('click'),
+    click(count) {
+      if (!Number.isInteger(count) || count < 1 || count > 10) return Promise.reject(new Error('클릭 배치는 1~10회의 정수여야 합니다.'));
+      return action('click_batch', count);
+    },
     upgrade: () => action('levelup'),
     dispose() {
       disposed = true;

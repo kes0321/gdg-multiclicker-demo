@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { Crown, Signal } from 'lucide-react';
 import { theme } from './theme';
 import { createApiGameService, type GameService, type GameState } from './game-service';
+import { createClickBatcher } from './click-batcher';
 import './styles.css';
 
 const number = (value: number) => value.toLocaleString('ko-KR');
@@ -40,6 +41,7 @@ function Game({ playerName }: { playerName: string }) {
   const particleTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const queue = useRef(Promise.resolve());
   const queueVersion = useRef(0);
+  const batcher = useRef<ReturnType<typeof createClickBatcher> | null>(null);
 
   useEffect(() => () => {
     particleTimers.current.forEach(clearTimeout);
@@ -51,6 +53,8 @@ function Game({ playerName }: { playerName: string }) {
     service.current = api;
     queue.current = Promise.resolve();
     void enqueue(() => api.getState());
+    const clickBatcher = createClickBatcher(count => { void enqueue(() => api.click(count)); });
+    batcher.current = clickBatcher;
     let refreshing = false;
     const timer = setInterval(() => {
       if (refreshing) return;
@@ -59,6 +63,8 @@ function Game({ playerName }: { playerName: string }) {
     }, 5000);
     return () => {
       clearInterval(timer);
+      clickBatcher.dispose();
+      batcher.current = null;
       service.current = null;
       queueVersion.current++;
       api.dispose();
@@ -76,13 +82,14 @@ function Game({ playerName }: { playerName: string }) {
     }).catch((reason: unknown) => {
       if (version !== queueVersion.current) return;
       queueVersion.current++;
+      batcher.current?.clear();
       setError(reason instanceof Error ? reason.message : '서버 요청에 실패했습니다.');
     });
     return queue.current;
   }
 
   function reward(x: number, y: number) {
-    if (!game || error) return;
+    if (!game || error || busy) return;
     const id = nextParticleId.current++;
     setParticles(current => [...current.slice(-29), { id, x, y, value: game.goldPerClick }]);
     const timer = setTimeout(() => {
@@ -91,7 +98,7 @@ function Game({ playerName }: { playerName: string }) {
     }, 800);
     particleTimers.current.add(timer);
     setBounce(value => value + 1);
-    void enqueue(() => service.current!.click());
+    batcher.current?.add();
   }
 
   function click(event: React.MouseEvent<HTMLElement>) {
@@ -102,7 +109,7 @@ function Game({ playerName }: { playerName: string }) {
   async function upgrade() {
     if (!game || busy || game.gold < game.upgradeCost) return;
     setBusy(true);
-    try { await enqueue(() => service.current!.upgrade()); }
+    try { await batcher.current?.afterFlush(() => enqueue(() => service.current!.upgrade())); }
     finally { setBusy(false); }
   }
 
