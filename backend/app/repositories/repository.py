@@ -20,6 +20,7 @@ class Player(TypedDict):
 class RankingEntry(TypedDict):
     rank: int
     player_id: str
+    nickname: str
     score: int
 
 
@@ -97,16 +98,28 @@ class RedisRepository:
             limit - 1,
             withscores=True,
         )
-
         # entries 예시:
         # [("p001", 1500.0), ("p002", 900.0)]
+        
+        # redis pipeline을 사용하여 여러 플레이어의 닉네임 조회 명령을 한 번에 실행
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for player_id, _ in entries:
+                pipe.hget(f"player:{player_id}", "nickname")
+
+            nicknames = await pipe.execute()
+        
+        
         return [
             {
                 "rank": rank,
                 "player_id": player_id,
+                "nickname": nickname if nickname is not None else "Unknown",
                 "score": int(score),
             }
-            for rank, (player_id, score) in enumerate(entries, start=1)
+            for rank, ((player_id, score), nickname) in enumerate(
+                zip(entries, nicknames),
+                start=1,
+            )
         ]
 
     async def get_player_rank(self, player_id: str) -> int | None:
