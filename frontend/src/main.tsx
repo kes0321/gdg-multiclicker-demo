@@ -4,6 +4,7 @@ import { Crown, Signal } from 'lucide-react';
 import { theme } from './theme';
 import { createApiGameService, type GameService, type GameState } from './game-service';
 import { createClickBatcher } from './click-batcher';
+import { createClickPrediction } from './click-prediction';
 import './styles.css';
 
 const number = (value: number) => value.toLocaleString('ko-KR');
@@ -42,6 +43,7 @@ function Game({ playerName }: { playerName: string }) {
   const queue = useRef(Promise.resolve());
   const queueVersion = useRef(0);
   const batcher = useRef<ReturnType<typeof createClickBatcher> | null>(null);
+  const prediction = useRef(createClickPrediction());
 
   useEffect(() => () => {
     particleTimers.current.forEach(clearTimeout);
@@ -51,9 +53,10 @@ function Game({ playerName }: { playerName: string }) {
   useEffect(() => {
     const api = createApiGameService(playerName);
     service.current = api;
+    prediction.current = createClickPrediction();
     queue.current = Promise.resolve();
     void enqueue(() => api.getState());
-    const clickBatcher = createClickBatcher(count => { void enqueue(() => api.click(count)); });
+    const clickBatcher = createClickBatcher(count => { void enqueue(() => api.click(count), count); });
     batcher.current = clickBatcher;
     let refreshing = false;
     const timer = setInterval(() => {
@@ -71,18 +74,19 @@ function Game({ playerName }: { playerName: string }) {
     };
   }, [playerName]);
 
-  function enqueue(action: () => Promise<GameState>) {
+  function enqueue(action: () => Promise<GameState>, completedClicks = 0) {
     const version = queueVersion.current;
     queue.current = queue.current.then(async () => {
       if (version !== queueVersion.current) return;
       const state = await action();
       if (version !== queueVersion.current) return;
-      setGame(state);
+      setGame(prediction.current.reconcile(state, completedClicks));
       setError('');
     }).catch((reason: unknown) => {
       if (version !== queueVersion.current) return;
       queueVersion.current++;
       batcher.current?.clear();
+      setGame(prediction.current.discard());
       setError(reason instanceof Error ? reason.message : '서버 요청에 실패했습니다.');
     });
     return queue.current;
@@ -98,6 +102,7 @@ function Game({ playerName }: { playerName: string }) {
     }, 800);
     particleTimers.current.add(timer);
     setBounce(value => value + 1);
+    setGame(prediction.current.add());
     batcher.current?.add();
   }
 
@@ -135,7 +140,7 @@ function Game({ playerName }: { playerName: string }) {
             <span className="player-name" title={player.name}>{player.name}</span>
             {player.id === game.playerId && <span className="me-badge">나</span>}
           </span>
-          <span className="player-gold">{number(player.gold)}<small> G</small></span>
+          <span className="player-gold">{number(player.id === game.playerId ? game.gold : player.gold)}<small> G</small></span>
         </li>)}
       </ol>
     </section>
