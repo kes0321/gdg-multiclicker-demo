@@ -36,6 +36,41 @@ async def handle_click(
     return True
 
 
+async def handle_click_batch(
+    websocket: WebSocket,
+    repository: RedisRepository,
+    player_id: str,
+    message: dict,
+) -> bool:
+    count = message.get("count")
+
+    # 문자열 "3", 실수 3.0, bool true도 거절
+    if type(count) is not int or not 1 <= count <= 10:
+        await websocket.send_json({
+            "type": "click_batch_result",
+            "success": False,
+            "code": "INVALID_BATCH_COUNT",
+            "message": "count must be an integer between 1 and 10",
+        })
+        return True
+
+    result = await repository.click_batch(player_id, count)
+
+    if not result["success"] and result["code"] == "PLAYER_NOT_FOUND":
+        await websocket.close(
+            code=1008,
+            reason="Player not found",
+        )
+        return False
+
+    await websocket.send_json({
+        "type": "click_batch_result",
+        **result,
+    })
+
+    return True
+
+
 async def handle_levelup(
     websocket: WebSocket,
     repository: RedisRepository,
@@ -115,6 +150,14 @@ async def game_websocket(websocket: WebSocket):
             if message_type == "click":
                 connected = await handle_click(
                     websocket, repository, player_id
+                )
+                
+            elif message_type == "click_batch":
+                connected = await handle_click_batch(
+                    websocket,
+                    repository,
+                    player_id,
+                    message,
                 )
 
             elif message_type == "levelup":

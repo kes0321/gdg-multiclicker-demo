@@ -45,6 +45,11 @@ class RedisRepository:
             click_path.read_text(encoding="utf-8")
         )
         
+        batch_path = Path(__file__).parent / "scripts" / "click_batch.lua"
+        self._click_batch_script = redis.register_script(
+            batch_path.read_text(encoding="utf-8")
+        )
+        
         levelup_path = Path(__file__).parent / "scripts" / "levelup.lua"
         self._levelup_script = redis.register_script(
             levelup_path.read_text(encoding="utf-8")
@@ -181,6 +186,35 @@ class RedisRepository:
             "level": int(result[2]),
             "total_clicks": int(result[3]),
             "gold_gained": int(result[4]),
+        }
+        
+    async def click_batch(self, player_id: str, count: int) -> dict:
+        # bool은 Python에서 int의 하위 타입이므로 type으로 엄격하게 검사
+        if type(count) is not int or not 1 <= count <= 10:
+            raise ValueError("count는 1~10의 정수여야 합니다.")
+
+        result = await self._click_batch_script(
+            keys=[
+                f"player:{player_id}",
+                self.LEADERBOARD_KEY,
+            ],
+            args=[player_id, count],
+        )
+
+        if result[0] == 0:
+            return {
+                "success": False,
+                "code": result[1],
+            }
+
+        return {
+            "success": True,
+            "player_id": player_id,
+            "score": int(result[1]),
+            "level": int(result[2]),
+            "total_clicks": int(result[3]),
+            "gold_gained": int(result[4]),
+            "accepted_clicks": int(result[5]),
         }
         
     async def levelup(self, player_id: str) -> dict:
