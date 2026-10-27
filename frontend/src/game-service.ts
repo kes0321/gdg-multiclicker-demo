@@ -1,12 +1,15 @@
 export interface Player { id: string; name: string; gold: number; rank: number }
 export interface GameState { playerId: string; gold: number; goldPerClick: number; upgradeCost: number; level: number; leaderboard: Player[]; ping: number | null }
-export interface GameService { getState(): Promise<GameState>; click(count: number): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void }
+export interface GameService {
+  getState(): Promise<GameState>; click(count: number): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void;
+  subscribe(onLeaderboard: (players: Player[]) => void, onError: (error: Error) => void): () => void;
+}
 
 interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number }
 interface Ranking { rank: number; player_id: string; nickname: string; score: number }
 interface ServerMessage {
   type: string; player?: ApiPlayer; score?: number; level?: number; total_clicks?: number;
-  success?: boolean; code?: string; message?: string;
+  success?: boolean; code?: string; message?: string; players?: Ranking[];
 }
 
 export function createApiGameService(nickname: string): GameService {
@@ -16,6 +19,7 @@ export function createApiGameService(nickname: string): GameService {
   let socket: WebSocket | undefined;
   let connecting: Promise<void> | undefined;
   let disposed = false;
+  const listeners = new Set<{ onLeaderboard: (players: Player[]) => void; onError: (error: Error) => void }>();
   const controller = new AbortController();
   let pending: { type: string; started: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
   let cancelConnection: ((error: Error) => void) | undefined;
@@ -68,6 +72,7 @@ export function createApiGameService(nickname: string): GameService {
           ws.onclose = null;
           ws.onerror = null;
           ws.close();
+          if (!disposed) listeners.forEach(listener => listener.onError(error));
         };
         const timer = setTimeout(() => fail(new Error('서버 연결 시간이 초과되었습니다.')), 10000);
         cancelConnection = fail;
@@ -76,6 +81,12 @@ export function createApiGameService(nickname: string): GameService {
           let message: ServerMessage;
           try { message = JSON.parse(event.data); }
           catch { fail(new Error('서버 응답을 읽을 수 없습니다.')); return; }
+          if (message.type === 'leaderboard' && Array.isArray(message.players)) {
+            leaderboard = message.players.slice(0, 25).map(entry => ({ id: entry.player_id,
+              name: entry.nickname, gold: entry.score, rank: entry.rank }));
+            listeners.forEach(listener => listener.onLeaderboard([...leaderboard]));
+            return;
+          }
           if (message.type === 'connected' && message.player) {
             player = message.player;
             ready = true;
@@ -125,14 +136,12 @@ export function createApiGameService(nickname: string): GameService {
   return {
     async getState() {
       await connect();
-      const [current, ranking] = await Promise.all([
-        request<ApiPlayer>(`/api/players/${encodeURIComponent(player!.player_id)}`),
-        request<{ players: Ranking[] }>('/api/leaderboard?limit=25'),
-      ]);
-      player = current;
-      leaderboard = ranking.players.map(entry => ({ id: entry.player_id, name: entry.nickname,
-        gold: entry.score, rank: entry.rank }));
       return snapshot();
+    },
+    subscribe(onLeaderboard, onError) {
+      const listener = { onLeaderboard, onError };
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
     },
     click(count) {
       if (!Number.isInteger(count) || count < 1 || count > 10) return Promise.reject(new Error('클릭 배치는 1~10회의 정수여야 합니다.'));
@@ -141,6 +150,7 @@ export function createApiGameService(nickname: string): GameService {
     upgrade: () => action('levelup'),
     dispose() {
       disposed = true;
+      listeners.clear();
       controller.abort();
       cancelConnection?.(new Error('연결이 종료되었습니다.'));
       rejectPending(new Error('연결이 종료되었습니다.'));

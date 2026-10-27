@@ -39,3 +39,18 @@ test('uses authoritative upgrade results and resets pending clicks if session pl
   assert.equal(prediction.add().gold, 3);
   assert.equal(prediction.reconcile({ ...state, playerId: 'new-player', gold: 0 }).gold, 0);
 });
+
+test('leaderboard broadcasts preserve pending predictions and do not acknowledge in-flight clicks', () => {
+  const prediction = createClickPrediction();
+  const ranking = [{ id: 'me', name: '나', rank: 1, gold: 120 }];
+  // A broadcast can arrive before the initial state promise completes.
+  assert.equal(prediction.updateLeaderboard(ranking), undefined);
+  assert.deepEqual(prediction.reconcile(state).leaderboard, ranking);
+  for (let i = 0; i < 12; i++) prediction.add();
+  const nextRanking = [{ id: 'other', name: '다른 사람', rank: 1, gold: 150 }, ...ranking];
+  assert.equal(prediction.updateLeaderboard(nextRanking).gold, 124);
+  const acknowledged = prediction.reconcile({ ...state, gold: 120 }, 10);
+  assert.equal(acknowledged.gold, 124);
+  assert.deepEqual(acknowledged.leaderboard, nextRanking);
+  assert.deepEqual(prediction.updateLeaderboard([]).leaderboard, []);
+});
