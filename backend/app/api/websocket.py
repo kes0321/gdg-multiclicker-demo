@@ -36,6 +36,28 @@ async def handle_click(
     return True
 
 
+async def handle_levelup(
+    websocket: WebSocket,
+    repository: RedisRepository,
+    player_id: str,
+) -> bool:
+    result = await repository.levelup(player_id)
+
+    if not result["success"] and result["code"] == "PLAYER_NOT_FOUND":
+        await websocket.close(
+            code=1008,
+            reason="Player not found",
+        )
+        return False
+
+    await websocket.send_json({
+        "type": "levelup_result",
+        **result,
+    })
+
+    return True
+
+
 @router.websocket("/ws")
 async def game_websocket(websocket: WebSocket):
     repository: RedisRepository = (
@@ -87,22 +109,28 @@ async def game_websocket(websocket: WebSocket):
                     "code": "INVALID_MESSAGE",
                 })
                 continue
-
-            if message.get("type") == "click":
+            
+            message_type = message.get("type")
+            
+            if message_type == "click":
                 connected = await handle_click(
-                    websocket,
-                    repository,
-                    player_id,
+                    websocket, repository, player_id
                 )
 
-                if not connected:
-                    return
-
+            elif message_type == "levelup":
+                connected = await handle_levelup(
+                    websocket, repository, player_id
+                )
+                
             else:
                 await websocket.send_json({
                     "type": "error",
                     "code": "UNKNOWN_MESSAGE_TYPE",
                 })
+                continue
+
+            if not connected:
+                return
 
     except WebSocketDisconnect:
         # 브라우저 종료, 새로고침, 네트워크 단절 등
