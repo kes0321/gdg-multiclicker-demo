@@ -4,6 +4,7 @@ from app.repositories.repository import RedisRepository
 from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 from app.api.http import router as http_router
+from app.api.websocket import router as websocket_router
 
 
 @asynccontextmanager
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(http_router)
+app.include_router(websocket_router)
 
 
 @app.get("/hello")

@@ -35,12 +35,18 @@ class RedisRepository:
         # decode_responses=True로 생성한 클라이언트를 사용해야 함
         self.redis = redis
 
-        script_path = (
-            Path(__file__).parent / "scripts" / "create_player.lua"
+        script_path = Path(__file__).parent / "scripts" / "create_player.lua"
+        
+        self._create_player_script = redis.register_script(
+            script_path.read_text(encoding="utf-8")
         )
-        script = script_path.read_text(encoding="utf-8")
+        
+        click_path = Path(__file__).parent / "scripts" / "click.lua"
 
-        self._create_player_script = redis.register_script(script)
+        self._click_script = redis.register_script(
+            click_path.read_text(encoding="utf-8")
+        )
+
 
 
     async def ping(self) -> bool:
@@ -153,4 +159,23 @@ class RedisRepository:
 
         return player_id, token
 
-    
+
+    async def click(self, player_id: str) -> dict | None:
+        result = await self._click_script(
+            keys=[
+                f"player:{player_id}",
+                self.LEADERBOARD_KEY,
+            ],
+            args=[player_id],
+        )
+
+        if result[0] == 0:
+            return None
+
+        return {
+            "player_id": player_id,
+            "score": int(result[1]),
+            "level": int(result[2]),
+            "total_clicks": int(result[3]),
+            "gold_gained": int(result[4]),
+        }
