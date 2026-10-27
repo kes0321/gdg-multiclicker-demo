@@ -1,6 +1,6 @@
 ﻿# Clicker frontend
 
-React + TypeScript + Vite. No backend calls are made.
+React + TypeScript + Vite, connected to the backend HTTP and WebSocket APIs.
 
 ```sh
 npm install
@@ -8,11 +8,18 @@ npm run dev
 ```
 
 Build verification: `npm run build`.
+API adapter contract tests: `node --test tests/game-service.test.mjs`.
 
 - `src/theme.ts`: target image, colors, and sample player name; independent of gameplay.
 - `public/bread.svg`: target illustration.
-- `src/game-service.ts`: typed adapter with local demo data, 24 other players plus you. Replace its methods with server calls.
-- `src/main.tsx`: fullscreen game, 25-player leaderboard, gold, target, upgrade button, and sample ping.
+- `src/game-service.ts`: cookie session creation/restoration, WebSocket clicks and upgrades, player state and leaderboard requests.
+- `src/main.tsx`: fullscreen game, top-25 leaderboard, gold, target, upgrade button, and measured game-request round-trip time.
 - `src/styles.css`: viewport-sized layout without page or panel scrolling. Top three players have gold, silver, and bronze treatments.
 
-Click anywhere outside the upgrade control to gain gold. The target also supports keyboard activation. Game operations are queued in order. The upgrade button displays level, cost, and the change in gold per click. Competitor scores and ping are sample values. Progress resets on refresh.
+Start the backend and Redis, then run `npm run dev`. Vite forwards `/api` and `/ws` to `http://localhost:8000`. To use another backend address, set `BACKEND_URL` in `.env.local` before starting Vite. Production hosting must forward `/api` and `/ws` (including WebSocket upgrades) to the backend on the same origin; the Vite development proxy is not included in the production build.
+
+Enter a nickname (1–20 characters) to create or restore a player through `POST /api/players`. The browser manages the HttpOnly session cookie. An existing session restores its original nickname and progress.
+
+Click anywhere outside the controls to send a WebSocket `click`; the target also supports keyboard activation. Game operations are queued in order. Upgrades send `levelup` and use the server's `level × 100` cost. Scores and levels come from server responses. Every five seconds, the frontend retrieves the current player and `GET /api/leaderboard?limit=25`, using the returned `nickname` and `rank` directly. The leaderboard only contains players returned by the server; your row is highlighted by player ID when present.
+
+Failed requests show an error and cancel queued inputs. Polling or the retry button restores the session and synchronizes state. Requests without a response are not replayed, since the server may already have processed them. The latency display measures the latest click/upgrade response time and shows `—` until measured.

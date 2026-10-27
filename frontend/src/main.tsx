@@ -2,7 +2,7 @@
 import { createRoot } from 'react-dom/client';
 import { Crown, Signal } from 'lucide-react';
 import { theme } from './theme';
-import { createMockGameService, type GameState } from './game-service';
+import { createApiGameService, type GameService, type GameState } from './game-service';
 import './styles.css';
 
 const number = (value: number) => value.toLocaleString('ko-KR');
@@ -30,33 +30,59 @@ function App() {
 }
 
 function Game({ playerName }: { playerName: string }) {
-  const [service] = useState(() => createMockGameService(playerName));
+  const service = useRef<GameService | null>(null);
   const [game, setGame] = useState<GameState>();
   const [bounce, setBounce] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [error, setError] = useState('');
   const [particles, setParticles] = useState<{ id: number; x: number; y: number; value: number }[]>([]);
   const nextParticleId = useRef(0);
   const particleTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
   const queue = useRef(Promise.resolve());
+  const queueVersion = useRef(0);
 
   useEffect(() => () => {
     particleTimers.current.forEach(clearTimeout);
     particleTimers.current.clear();
   }, []);
 
-  useEffect(() => { service.getState().then(setGame).catch(() => setFailed(true)); }, [service]);
+  useEffect(() => {
+    const api = createApiGameService(playerName);
+    service.current = api;
+    queue.current = Promise.resolve();
+    void enqueue(() => api.getState());
+    let refreshing = false;
+    const timer = setInterval(() => {
+      if (refreshing) return;
+      refreshing = true;
+      void enqueue(() => api.getState()).finally(() => { refreshing = false; });
+    }, 5000);
+    return () => {
+      clearInterval(timer);
+      service.current = null;
+      queueVersion.current++;
+      api.dispose();
+    };
+  }, [playerName]);
 
   function enqueue(action: () => Promise<GameState>) {
+    const version = queueVersion.current;
     queue.current = queue.current.then(async () => {
-      setGame(await action());
-      setFailed(false);
-    }).catch(() => setFailed(true));
+      if (version !== queueVersion.current) return;
+      const state = await action();
+      if (version !== queueVersion.current) return;
+      setGame(state);
+      setError('');
+    }).catch((reason: unknown) => {
+      if (version !== queueVersion.current) return;
+      queueVersion.current++;
+      setError(reason instanceof Error ? reason.message : '서버 요청에 실패했습니다.');
+    });
     return queue.current;
   }
 
   function reward(x: number, y: number) {
-    if (!game) return;
+    if (!game || error) return;
     const id = nextParticleId.current++;
     setParticles(current => [...current.slice(-29), { id, x, y, value: game.goldPerClick }]);
     const timer = setTimeout(() => {
@@ -65,7 +91,7 @@ function Game({ playerName }: { playerName: string }) {
     }, 800);
     particleTimers.current.add(timer);
     setBounce(value => value + 1);
-    void enqueue(() => service.click());
+    void enqueue(() => service.current!.click());
   }
 
   function click(event: React.MouseEvent<HTMLElement>) {
@@ -76,23 +102,32 @@ function Game({ playerName }: { playerName: string }) {
   async function upgrade() {
     if (!game || busy || game.gold < game.upgradeCost) return;
     setBusy(true);
-    try { await enqueue(() => service.upgrade()); }
+    try { await enqueue(() => service.current!.upgrade()); }
     finally { setBusy(false); }
   }
 
-  if (!game) return <div className="app" aria-label={failed ? '연결 실패' : '불러오는 중'} />;
+  function retry() { void enqueue(() => service.current!.getState()); }
+
+  if (!game) return <main className="entry-screen"><div className="entry-form" role="status">
+    <p>{error || '서버에 연결하는 중입니다…'}</p>
+    {error && <button className="start-button" onClick={retry}>다시 연결</button>}
+  </div></main>;
 
   return <main className="app" onClick={click} style={{ '--accent': theme.colors.accent, '--background': theme.colors.background } as React.CSSProperties}>
-    <div className={`ping ${failed ? 'disconnected' : ''}`} aria-label={failed ? '연결 오류' : '샘플 핑'} title="서버 연동 전 샘플 값">
-      <Signal size={13}/><span>{failed ? '—' : game.ping} ms</span>
+    <div className={`ping ${error ? 'disconnected' : ''}`} aria-label={error ? '연결 오류' : '서버 응답 시간'} title={error || '최근 게임 요청의 왕복 시간'}>
+      <Signal size={13}/><span>{error || game.ping === null ? '—' : game.ping} ms</span>
     </div>
+    {error && <div className="connection-error" role="alert">{error} <button onClick={retry}>다시 연결</button></div>}
 
     <section className="leaderboard" aria-label="리더보드">
       <div className="table-head"><span>순위</span><span>닉네임</span><span>골드</span></div>
       <ol className="rank-list">
-        {game.leaderboard.map((player, index) => <li className={`rank-row ${index < 3 ? `podium podium-${index+1}` : ''} ${player.id === 'me' ? 'is-me' : ''}`} key={player.id} aria-current={player.id === 'me' ? 'true' : undefined}>
-          <span className="rank-number">{index === 0 && <Crown className="first-crown" aria-hidden="true"/>}{index+1}</span>
-          <span className="player-name" title={player.name}>{player.name}</span>
+        {game.leaderboard.map(player => <li className={`rank-row ${player.rank <= 3 ? `podium podium-${player.rank}` : ''} ${player.id === game.playerId ? 'is-me' : ''}`} key={player.id} aria-current={player.id === game.playerId ? 'true' : undefined}>
+          <span className="rank-number">{player.rank === 1 && <Crown className="first-crown" aria-hidden="true"/>}{player.rank}</span>
+          <span className="player-identity">
+            <span className="player-name" title={player.name}>{player.name}</span>
+            {player.id === game.playerId && <span className="me-badge">나</span>}
+          </span>
           <span className="player-gold">{number(player.gold)}<small> G</small></span>
         </li>)}
       </ol>
@@ -106,12 +141,12 @@ function Game({ playerName }: { playerName: string }) {
       <button className="target-button" onClick={event => {
         const rect = event.currentTarget.getBoundingClientRect();
         reward(event.detail === 0 ? rect.x + rect.width / 2 : event.clientX, event.detail === 0 ? rect.y + rect.height / 2 : event.clientY);
-      }} aria-label={`${theme.targetLabel}, ${game.goldPerClick} 골드 획득`}>
+      }} disabled={!!error} aria-label={`${theme.targetLabel}, ${game.goldPerClick} 골드 획득`}>
         <img key={bounce} className={`target-image ${bounce ? 'bounce' : ''}`} src={theme.targetImage} alt={theme.targetAlt} draggable={false}/>
       </button>
     </section>
 
-    <button className="upgrade-button" disabled={busy || game.gold < game.upgradeCost} onClick={upgrade} aria-label="업그레이드" aria-busy={busy}>
+    <button className="upgrade-button" disabled={!!error || busy || game.gold < game.upgradeCost} onClick={upgrade} aria-label="업그레이드" aria-busy={busy}>
       <span className="upgrade-top"><span>Lv. {game.level}</span><strong>{number(game.upgradeCost)} G</strong></span>
       <span className="upgrade-change"><span>{game.goldPerClick}</span><span className="upgrade-arrow">→</span><span>{game.goldPerClick+1}<small> G / 클릭</small></span></span>
     </button>
