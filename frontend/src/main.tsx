@@ -35,6 +35,7 @@ function App() {
 function Game({ playerName }: { playerName: string }) {
   const service = useRef<GameService | null>(null);
   const [game, setGame] = useState<GameState>();
+  const [onlineCount, setOnlineCount] = useState<number | null>(null);
   const [bounce, setBounce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [rankingOpen, setRankingOpen] = useState(false);
@@ -54,11 +55,15 @@ function Game({ playerName }: { playerName: string }) {
 
   useEffect(() => {
     const api = createApiGameService(playerName);
+    setOnlineCount(null);
     service.current = api;
     prediction.current = createClickPrediction();
     queue.current = Promise.resolve();
     const unsubscribe = api.subscribe(
-      players => { setGame(prediction.current.updateLeaderboard(players)); },
+      (players, count) => {
+        setOnlineCount(count);
+        setGame(prediction.current.updateLeaderboard(players));
+      },
       handleFailure,
     );
     void enqueue(() => api.getState());
@@ -75,6 +80,7 @@ function Game({ playerName }: { playerName: string }) {
   }, [playerName]);
 
   function handleFailure(reason: unknown) {
+    setOnlineCount(null);
     queueVersion.current++;
     batcher.current?.clear();
     setGame(prediction.current.discard());
@@ -136,7 +142,10 @@ function Game({ playerName }: { playerName: string }) {
     {error && <div className="connection-error" role="alert">{error} <button onClick={retry}>다시 연결</button></div>}
 
     <section className="leaderboard" aria-label="리더보드">
-      <button className="global-ranking-trigger" onClick={() => setRankingOpen(true)} aria-haspopup="dialog">전체 랭킹</button>
+      <div className="leaderboard-toolbar">
+        <span className="online-count" aria-label="현재 접속자 수">접속 <strong>{onlineCount === null ? '—' : number(onlineCount)}</strong>명</span>
+        <button className="global-ranking-trigger" onClick={() => setRankingOpen(true)} aria-haspopup="dialog">전체 랭킹</button>
+      </div>
       <div className="table-head"><span>순위</span><span>닉네임</span><span>골드</span></div>
       <ol className="rank-list">
         {game.leaderboard.map(player => <li className={`rank-row ${player.rank <= 3 ? `podium podium-${player.rank}` : ''} ${player.id === game.playerId ? 'is-me' : ''}`} key={player.id} aria-current={player.id === game.playerId ? 'true' : undefined}>

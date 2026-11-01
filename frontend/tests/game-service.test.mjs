@@ -68,7 +68,8 @@ test('HTTP session and WebSocket game contract', async t => {
   const service = createApiGameService('입력 닉네임');
   const broadcasts = [];
   const errors = [];
-  const unsubscribe = service.subscribe(players => broadcasts.push(players), error => errors.push(error));
+  const counts = [];
+  const unsubscribe = service.subscribe((players, count) => { broadcasts.push(players); counts.push(count); }, error => errors.push(error));
   t.after(() => { service.dispose(); Object.assign(globalThis, original); });
 
   await t.test('restores cookie session and uses leaderboard nickname, rank and ID', async () => {
@@ -140,6 +141,16 @@ test('HTTP session and WebSocket game contract', async t => {
     assert.deepEqual((await service.getState()).leaderboard, []);
     assert.equal(requests.length, before);
     assert.ok(requests.every(request => request.options.method === 'POST' && request.path === '/api/players'));
+  });
+  await t.test('counts all online players before truncating the visible top 25', async () => {
+    sockets.at(-1).emit({ type: 'leaderboard', players: Array.from({ length: 32 }, (_, index) => ({
+      rank: index + 1, player_id: `online-${index}`, nickname: `유저${index}`, score: 100-index,
+    })) });
+    assert.equal(broadcasts.at(-1).length, 25);
+    assert.equal(counts.at(-1), 32);
+    sockets.at(-1).emit({ type: 'leaderboard', players: [] });
+    assert.equal(counts.at(-1), 0);
+    assert.deepEqual(broadcasts.at(-1), []);
   });
   await t.test('reports idle disconnects and stops delivering broadcasts after unsubscribe', async () => {
     const before = broadcasts.length;

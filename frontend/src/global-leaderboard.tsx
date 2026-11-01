@@ -40,7 +40,7 @@ export function GlobalLeaderboard({ playerId, onClose }: { playerId: string; onC
     }}>
     <div className="global-ranking-content">
       <header className="global-ranking-header">
-        <h2 id="global-ranking-title">전체 랭킹 <small>상위 25명</small></h2>
+        <h2 id="global-ranking-title">전체 랭킹</h2>
         <button className="ranking-icon-button" onClick={() => setRevision(value => value+1)} disabled={loading} aria-label="랭킹 새로고침"><RefreshCw size={16}/></button>
         <button className="ranking-icon-button" onClick={onClose} aria-label="닫기" autoFocus><X size={19}/></button>
       </header>

@@ -2,7 +2,7 @@ export interface Player { id: string; name: string; gold: number; rank: number }
 export interface GameState { playerId: string; gold: number; goldPerClick: number; upgradeCost: number; level: number; leaderboard: Player[]; ping: number | null }
 export interface GameService {
   getState(): Promise<GameState>; click(count: number): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void;
-  subscribe(onLeaderboard: (players: Player[]) => void, onError: (error: Error) => void): () => void;
+  subscribe(onLeaderboard: (players: Player[], onlineCount: number) => void, onError: (error: Error) => void): () => void;
 }
 
 interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number }
@@ -32,7 +32,7 @@ export function createApiGameService(nickname: string): GameService {
   let socket: WebSocket | undefined;
   let connecting: Promise<void> | undefined;
   let disposed = false;
-  const listeners = new Set<{ onLeaderboard: (players: Player[]) => void; onError: (error: Error) => void }>();
+  const listeners = new Set<{ onLeaderboard: (players: Player[], onlineCount: number) => void; onError: (error: Error) => void }>();
   const controller = new AbortController();
   let pending: { type: string; started: number; resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | undefined;
   let cancelConnection: ((error: Error) => void) | undefined;
@@ -95,9 +95,10 @@ export function createApiGameService(nickname: string): GameService {
           try { message = JSON.parse(event.data); }
           catch { fail(new Error('서버 응답을 읽을 수 없습니다.')); return; }
           if (message.type === 'leaderboard' && Array.isArray(message.players)) {
+            const onlineCount = message.players.length;
             leaderboard = message.players.slice(0, 25).map(entry => ({ id: entry.player_id,
               name: entry.nickname, gold: entry.score, rank: entry.rank }));
-            listeners.forEach(listener => listener.onLeaderboard([...leaderboard]));
+            listeners.forEach(listener => listener.onLeaderboard([...leaderboard], onlineCount));
             return;
           }
           if (message.type === 'connected' && message.player) {
