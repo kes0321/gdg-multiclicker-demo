@@ -1,0 +1,15 @@
+# Enable after obtaining the certificate. On the Linux VM, persist in .env:
+# COMPOSE_FILE=compose.yaml:compose.https.yaml
+services:
+  frontend:
+    build:
+      args:
+        NGINX_CONFIG: nginx.https.conf
+    ports:
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      # Mount the entire tree: live/*.pem files are symlinks into archive/.
+      - ${LETSENCRYPT_DIR:-/etc/letsencrypt}:/etc/letsencrypt:ro
+  backend:
+    environment:
+      SESSION_COOKIE_SECURE: "true"

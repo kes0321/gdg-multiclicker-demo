@@ -12,19 +12,29 @@ import asyncio
 from http.cookiejar import CookieJar
 import json
 from pathlib import Path
+import ssl
 from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
 
 
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A local HTTP test must never follow the production HTTPS redirect
+        # and accidentally create players in a different deployment.
+        return None
+
+
 class Browser:
-    def __init__(self, base):
+    def __init__(self, base, tls_context=None):
         self.base = base.rstrip("/")
         self.cookies = CookieJar()
-        self.opener = build_opener(HTTPCookieProcessor(self.cookies))
+        self.opener = build_opener(
+            HTTPCookieProcessor(self.cookies), HTTPSHandler(context=tls_context), NoRedirect(),
+        )
 
     def request(self, path, body=None):
         data = json.dumps(body).encode() if body is not None else None
@@ -58,8 +68,8 @@ async def action(ws, kind, **kwargs):
     return await receive(ws, kind + "_result")
 
 
-async def exercise(base, state_path):
-    first, second = Browser(base), Browser(base)
+async def exercise(base, state_path, tls_context=None):
+    first, second = Browser(base, tls_context), Browser(base, tls_context)
     assert first.json("/api/health")[2] == {"status": "ok"}
     status, headers, index = first.request("/")
     assert status == 200 and "text/html" in headers["Content-Type"]
@@ -78,7 +88,8 @@ async def exercise(base, state_path):
     assert status == 201 and created["created"]
     cookie = headers["Set-Cookie"]
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie and "Path=/" in cookie
-    assert not next(iter(first.cookies)).secure, "Use local HTTP with SESSION_COOKIE_SECURE=false"
+    secure = urlsplit(base).scheme == "https"
+    assert next(iter(first.cookies)).secure == secure, "Cookie Secure must match HTTP/HTTPS mode"
     player_id = created["player"]["player_id"]
     status, _, restored = first.json("/api/players", {"nickname": "restore"})
     assert status == 200 and not restored["created"] and restored["player"] == created["player"]
@@ -88,9 +99,10 @@ async def exercise(base, state_path):
 
     parts = urlsplit(base)
     ws_url = urlunsplit(("wss" if parts.scheme == "https" else "ws", parts.netloc, "/ws", "", ""))
-    async with connect(ws_url, additional_headers={"Cookie": first.cookie_header()}) as a:
+    tls_options = {"ssl": tls_context} if secure and tls_context else {}
+    async with connect(ws_url, additional_headers={"Cookie": first.cookie_header()}, **tls_options) as a:
         assert (await receive(a, "connected"))["player"]["player_id"] == player_id
-        async with connect(ws_url, additional_headers={"Cookie": second.cookie_header()}) as b:
+        async with connect(ws_url, additional_headers={"Cookie": second.cookie_header()}, **tls_options) as b:
             await receive(b, "connected")
 
             def both(message):
@@ -139,10 +151,10 @@ async def exercise(base, state_path):
     print(f"Saved persistence expectations: {state_path} (contains test session cookies)")
 
 
-def check_persistence(base, state_path):
+def check_persistence(base, state_path, tls_context=None):
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["base"] == base, "Select the same deployment used for exercise"
-    browser = Browser(base)
+    browser = Browser(base, tls_context)
     assert browser.json("/api/health")[2] == {"status": "ok"}
     for snapshot in state["snapshots"]:
         player = snapshot["player"]
@@ -162,8 +174,13 @@ if __name__ == "__main__":
     parser.add_argument("--url", default="http://localhost")
     parser.add_argument("--state", type=Path, default=Path(".deployment-test/state.json"))
     parser.add_argument("--check-persistence", action="store_true")
+    parser.add_argument("--ca-file", type=Path, help="Additional trusted CA for local TLS tests; verification stays enabled")
     args = parser.parse_args()
+    tls_context = None
+    if args.ca_file:
+        tls_context = ssl.create_default_context()
+        tls_context.load_verify_locations(cafile=str(args.ca_file))
     if args.check_persistence:
-        check_persistence(args.url, args.state)
+        check_persistence(args.url, args.state, tls_context)
     else:
-        asyncio.run(exercise(args.url, args.state))
+        asyncio.run(exercise(args.url, args.state, tls_context))

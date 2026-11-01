@@ -1,7 +1,9 @@
 # Multiclicker 로컬 Docker 배포
 
 React/Vite 빌드 결과물은 Nginx 이미지에 포함된다. Compose는 `frontend`,
-`backend`, `redis` 세 서비스만 실행한다. 실제 VM 접속·배포와 TLS 구성은 이 저장소의 로컬 준비 작업에 포함하지 않는다.
+`backend`, `redis` 세 서비스만 실행한다. 기본은 로컬 HTTP이며,
+`gdgclicker.duckdns.org` HTTPS 전환은 [HTTPS 배포 절차](docs/HTTPS.md)를 따른다.
+실제 VM 접속·배포·공인 인증서 발급은 사용자가 수행한다.
 
 ```text
 브라우저 → http://localhost:${HTTP_PORT:-80} → frontend:80 (Nginx + React dist)
@@ -36,6 +38,10 @@ PowerShell의 복사 명령은 `Copy-Item .env.example .env`이다. `.env`가 �
 | --- | --- | --- |
 | `COMPOSE_PROJECT_NAME` | `multiclicker` | 컨테이너·네트워크·볼륨의 프로젝트 이름. 바꾸면 별도 데이터 볼륨을 사용한다. |
 | `HTTP_PORT` | `80` | Nginx 호스트 공개 포트. 예: `8080`이면 `http://localhost:8080`. |
+| `HTTPS_PORT` | `443` | HTTPS override에서 추가 공개하는 TLS 포트. 운영에서는 443 사용. |
+| `ACME_WEBROOT` | `./.acme-webroot` | 호스트의 HTTP-01 검증 파일 디렉터리. 프런트에 읽기 전용 마운트. |
+| `LETSENCRYPT_DIR` | `/etc/letsencrypt` | HTTPS override에서 마운트하는 호스트 인증서 디렉터리. |
+| `COMPOSE_FILE` | 미설정 | Linux VM에서 `compose.yaml:compose.https.yaml`로 설정하면 일반 명령도 HTTPS 모드 사용. |
 | `SESSION_COOKIE_SECURE` | `false` | `true`/`1`이면 생성·갱신 쿠키에 Secure 적용, `false`/`0`이면 로컬 HTTP 지원. |
 | `REDIS_HOST` | `localhost` | 백엔드 직접 실행 기본값. Compose는 항상 `redis`로 덮어쓴다. |
 | `REDIS_PORT` | `6379` | 백엔드 직접 실행 기본값. Compose는 항상 `6379`로 덮어쓴다. |
@@ -63,7 +69,8 @@ docker compose up -d --force-recreate --wait # 컨테이너만 재생성, 데이
 기본 컨테이너 이름은 `multiclicker-frontend-1`, `multiclicker-backend-1`,
 `multiclicker-redis-1`이다. 고정 `container_name`을 지정하지 않아 다른 프로젝트 이름으로 격리 실행할 수 있다.
 내부 통신은 Compose DNS의 `backend:8000`, `redis:6379`를 사용한다.
-호스트에는 프런트엔드 포트 하나만 공개하며, 기존 `docker run` Redis의 `127.0.0.1:6379`와 충돌하지 않는다.
+호스트에는 프런트엔드 HTTP 포트만 공개하며 HTTPS 모드에서는 443도 공개한다.
+backend와 Redis는 공개하지 않아 기존 `docker run` Redis의 `127.0.0.1:6379`와 충돌하지 않는다.
 백엔드는 Redis healthcheck 성공 후 시작하고 자체 `/api/health`가 성공한 뒤 Nginx를 시작한다.
 세 서비스 모두 `restart: unless-stopped`이다.
 
@@ -79,6 +86,8 @@ docker compose up -d --force-recreate --wait # 컨테이너만 재생성, 데이
 WebSocket은 Upgrade 헤더와 1시간 읽기·쓰기 타임아웃을 사용한다.
 Nginx는 Docker DNS를 주기적으로 다시 조회해 백엔드 재생성 후 주소 변경을 반영한다.
 쿠키는 `HttpOnly; SameSite=lax; Path=/`의 host-only 쿠키이며 Nginx가 Cookie/Set-Cookie를 그대로 전달한다.
+`/nginx-health`는 HTTP/HTTPS 전환과 무관하게 Nginx 자체 준비 상태를 확인한다.
+Redis를 포함한 앱 상태는 `/api/health`를 사용한다.
 
 ## Redis 영속화와 데이터 보존
 
@@ -184,7 +193,8 @@ Linux에서는 요구사항을 설치한 Python으로 `python scripts/verify_com
 검증 상태와 테스트 쿠키는 Git에서 제외한 `.deployment-test/state.json`에 저장한다.
 검증 스크립트는 프런트·SPA·API 404, 플레이어 생성과 재접속, 두 연결 사이 방송,
 클릭·배치·레벨업, 토큰 소진/거절/충전, 컨테이너 재생성 후 플레이어·세션 보존을 확인한다.
-`SESSION_COOKIE_SECURE=false`인 로컬 HTTP 환경용이다. HTTPS/TLS 자체를 검증하지 않는다.
+HTTP에서는 Secure 쿠키가 없는지, HTTPS에서는 Secure 쿠키와 WSS 연결까지 검증한다.
+로컬 테스트 인증서는 `--ca-file PATH`로 신뢰할 수 있으며 인증서·호스트 검증은 계속 적용한다.
 기존 Python 성장 곡선/Redis/Lua 테스트도 Compose의 Redis DB 15로 격리 실행할 수 있다.
 
 ```sh
@@ -202,18 +212,12 @@ docker compose run --rm --no-deps -e REDIS_TEST_URL=redis://redis:6379/15 -v ./b
 4. VM 내부에서 `/api/health`, 브라우저에서 프런트·세션·WebSocket을 확인한다. 클라우드 보안 그룹/방화벽에는 선택한 HTTP 포트만 연다. backend 8000/Redis 6379는 공개하지 않는다.
 5. Redis 볼륨의 백업 주기·보관 위치·디스크 용량을 마련한다. 업데이트는 저장소 pull 후 `docker compose up -d --build --wait`이며 볼륨을 삭제하지 않는다.
 
-현재 구성은 **HTTP만 제공하며 HTTPS는 아직 구성하지 않았다.** 공개 서비스에 HTTPS를 추가하려면
-도메인/DNS, 인증서 발급·자동 갱신, TLS 종료 프록시 또는 Nginx의 443 listener와 인증서 마운트,
-80→443 리다이렉트, VM/클라우드 443 허용이 추가로 필요하다.
-TLS 종료 프록시는 `/api/`와 `/ws` 경로·Cookie/Set-Cookie·WebSocket Upgrade를 유지해야 한다.
-외부 프록시에서 TLS를 종료한다면 신뢰한 프록시의 `X-Forwarded-Proto: https`가
-백엔드까지 보존되도록 현재 Nginx의 `$scheme` 전달 설정도 조정한다.
-이때 Nginx HTTP 포트의 직접 외부 접근을 차단하고 신뢰할 프록시만 헤더를 제공하도록 구성한다.
-현재 Uvicorn은 호스트에 노출하지 않는 Compose 네트워크의 프록시 헤더를 신뢰한다.
-
-TLS 동작을 확인한 뒤 `SESSION_COOKIE_SECURE=true`로 바꾸고
-`docker compose up -d --force-recreate --wait backend frontend`로 반영한다.
-브라우저는 자동으로 `wss`를 선택하지만 실제 인증서·프록시 설정과 쿠키 전달을 별도로 검증해야 한다.
-HTTPS를 추가해도 단일 백엔드·단일 worker 제한은 유지된다.
+HTTPS용 파일은 준비되어 있지만 실제 VM의 공인 인증서는 별도로 발급해야 한다.
+인증서가 없는 상태에서는 기본 HTTP 구성을 사용한다. 순서는 [HTTPS 배포 절차](docs/HTTPS.md)의
+HTTP 검증 경로 기동 → Certbot webroot 발급 → `.env`의 HTTPS 모드 활성화 → 갱신 훅 설치다.
+HTTPS 모드에서는 기존 Nginx 컨테이너가 TLS를 종료하고 HTTP를 308로 리다이렉트하며,
+Secure 쿠키를 강제한다. ACME와 Nginx healthcheck 경로는 HTTP로 유지한다.
+일반 로컬 HTTP 실행은 변경하지 않았으며 실제 VM의 DNS·방화벽·공인 인증서·자동 갱신은
+VM에서 별도로 확인한다. 단일 백엔드·단일 worker 제한은 HTTPS에서도 유지한다.
 Nginx 프록시 근거: [WebSocket proxying](https://nginx.org/en/docs/http/websocket.html),
 [proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html).

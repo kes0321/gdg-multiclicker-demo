@@ -17,3 +17,6 @@
 backups/
 *.rdb
 *.aof
+.acme-webroot/
+*.pem
+*.key

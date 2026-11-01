@@ -10,3 +10,5 @@ Dockerfile
 .git/
 coverage/
 .cache/
+**/*.pem
+**/*.key
