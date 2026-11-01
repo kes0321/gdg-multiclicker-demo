@@ -6,6 +6,7 @@ import { createApiGameService, type GameService, type GameState } from './game-s
 import { createClickBatcher } from './click-batcher';
 import { createClickPrediction } from './click-prediction';
 import { GlobalLeaderboard } from './global-leaderboard';
+import { ClickerMark } from './clicker-mark';
 import './styles.css';
 
 const number = (value: number) => value.toLocaleString('ko-KR');
@@ -23,7 +24,7 @@ function App() {
       if (name) setPlayerName(name);
     }}>
       <div className="entry-title">
-        <h1>GDGoC 클리커</h1>
+        <h1 aria-label="GDGoC Clicker"><ClickerMark/></h1>
         <span>김은성</span>
       </div>
       <input className="nickname-input" aria-label="닉네임" placeholder="닉네임" value={nickname} onChange={event => setNickname(event.target.value)} maxLength={20} autoComplete="nickname" autoFocus required/>
@@ -168,7 +169,7 @@ function Game({ playerName }: { playerName: string }) {
         const rect = event.currentTarget.getBoundingClientRect();
         reward(event.detail === 0 ? rect.x + rect.width / 2 : event.clientX, event.detail === 0 ? rect.y + rect.height / 2 : event.clientY);
       }} disabled={!!error} aria-label={`${theme.targetLabel}, ${game.goldPerClick} 골드 획득`}>
-        <img key={bounce} className={`target-image ${bounce ? 'bounce' : ''}`} src={theme.targetImage} alt={theme.targetAlt} draggable={false}/>
+        <ClickerMark key={bounce} animated={bounce > 0}/>
       </button>
     </section>
 

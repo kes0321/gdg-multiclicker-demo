@@ -12,11 +12,13 @@ Build verification: `npm run build`.
 The online leaderboard's **전체 랭킹** button opens an independent HTTP snapshot of the top 25 players across all users (`GET /api/leaderboard?limit=25`), including offline players. Each opening and manual refresh fetches new data. The popup supports Escape, outside click, close, loading, empty, and retry states; closing cancels its request. It does not change the online ranking or local gold predictions.
 API adapter and batching tests: `node --test tests/*.test.mjs`.
 
-- `src/theme.ts`: target image, colors, and sample player name; independent of gameplay.
-- `public/bread.svg`: target illustration.
+- `src/theme.ts`: GDGoC Clicker wordmark text and theme colors; independent of gameplay.
+- `src/clicker-mark.tsx`: shared typographic click target and entry title, with four-color SVG brackets.
 - `src/game-service.ts`: cookie session creation/restoration, WebSocket clicks and upgrades, player state and WebSocket leaderboard broadcasts.
 - `src/main.tsx`: fullscreen game, top-25 leaderboard, gold, target, upgrade button, and measured game-request round-trip time.
 - `src/styles.css`: viewport-sized layout without page or panel scrolling. Top three players have gold, silver, and bronze treatments.
+
+Visual reference: https://gdgoc.yonsei.ac.kr/ko — charcoal stage, bold typography, four-color brackets, and restrained rounded controls. The game target is a code-native GDGoC Clicker wordmark rather than an image.
 
 Start the backend and Redis, then run `npm run dev`. Vite forwards `/api` and `/ws` to `http://localhost:8000`. To use another backend address, set `BACKEND_URL` in `.env.local` before starting Vite. Production hosting must forward `/api` and `/ws` (including WebSocket upgrades) to the backend on the same origin; the Vite development proxy is not included in the production build.
 

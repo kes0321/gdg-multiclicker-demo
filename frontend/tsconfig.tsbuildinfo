@@ -1,1 +1,1 @@
-{"root":["./src/click-batcher.ts","./src/click-prediction.ts","./src/game-service.ts","./src/global-leaderboard.tsx","./src/main.tsx","./src/theme.ts"],"version":"5.7.3"}
+{"root":["./src/click-batcher.ts","./src/click-prediction.ts","./src/clicker-mark.tsx","./src/game-service.ts","./src/global-leaderboard.tsx","./src/main.tsx","./src/theme.ts"],"version":"5.7.3"}
