@@ -17,18 +17,19 @@ async def handle_click(
     repository: RedisRepository,
     player_id: str,
 ) -> bool:
-    """클릭 처리. 플레이어가 없으면 연결 종료 후 False 반환."""
-
     result = await repository.click(player_id)
 
-    if result is None:
-        await websocket.close(
-            code=1008,
-            reason="Player not found",
-        )
-        return False
+    if not result["success"]:
+        if result["code"] == "PLAYER_NOT_FOUND":
+            await websocket.close(
+                code=1008,
+                reason="Player not found",
+            )
+            return False
+    else:
+        await broadcast_leaderboard(repository)
 
-    await websocket.send_json({
+    await manager.send(websocket, {
         "type": "click_result",
         **result,
     })

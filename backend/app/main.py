@@ -1,6 +1,8 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from app.repositories.repository import RedisRepository
+from app.services.token_refill import run_token_refill
+
 from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 from app.api.http import router as http_router
@@ -14,14 +16,29 @@ async def lifespan(app: FastAPI):
         port=6379,
         decode_responses=True,  # bytes 대신 문자열로 반환
     )
-    app.state.redis = client
-    app.state.repository = RedisRepository(client)
+    refill_task = None
 
     try:
         await client.ping()
         print("Redis 연결 성공!")
+        repository = RedisRepository(client)
+
+        app.state.redis = client
+        app.state.repository = repository
+
+        refill_task = asyncio.create_task(
+            run_token_refill(repository)
+        )
+
         yield
+
     finally:
+        if refill_task is not None:
+            refill_task.cancel()
+
+            with suppress(asyncio.CancelledError):
+                await refill_task
+
         await client.aclose()
 
 

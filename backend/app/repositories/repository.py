@@ -29,7 +29,7 @@ class RedisRepository:
 
     SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
     BUCKET_TTL_SECONDS = 60
-    BUCKET_CAPACITY = 35
+    BUCKET_CAPACITY = 30
 
     def __init__(self, redis: Redis):
         # main.py에서 만든 Redis 클라이언트를 받아 재사용
@@ -54,6 +54,11 @@ class RedisRepository:
         levelup_path = Path(__file__).parent / "scripts" / "levelup.lua"
         self._levelup_script = redis.register_script(
             levelup_path.read_text(encoding="utf-8")
+        )
+
+        refill_path = (Path(__file__).parent / "scripts" / "refill_buckets.lua")
+        self._refill_buckets_script = redis.register_script(
+            refill_path.read_text(encoding="utf-8")
         )
 
 
@@ -181,28 +186,11 @@ class RedisRepository:
         return player_id, token
 
 
-    async def click(self, player_id: str) -> dict | None:
-        result = await self._click_script(
-            keys=[
-                f"player:{player_id}",
-                self.LEADERBOARD_KEY,
-            ],
-            args=[player_id],
-        )
+    async def click(self, player_id: str) -> dict:
+        return await self.click_batch(player_id, count=1)
 
-        if result[0] == 0:
-            return None
-
-        return {
-            "player_id": player_id,
-            "score": int(result[1]),
-            "level": int(result[2]),
-            "total_clicks": int(result[3]),
-            "gold_gained": int(result[4]),
-        }
         
     async def click_batch(self, player_id: str, count: int) -> dict:
-        # bool은 Python에서 int의 하위 타입이므로 type으로 엄격하게 검사
         if type(count) is not int or not 1 <= count <= 10:
             raise ValueError("count는 1~10의 정수여야 합니다.")
 
@@ -210,15 +198,21 @@ class RedisRepository:
             keys=[
                 f"player:{player_id}",
                 self.LEADERBOARD_KEY,
+                f"rate_limit:click:{player_id}",
             ],
             args=[player_id, count],
         )
 
         if result[0] == 0:
-            return {
+            response = {
                 "success": False,
                 "code": result[1],
             }
+
+            if result[1] == "RATE_LIMITED":
+                response["remaining_tokens"] = int(result[2])
+
+            return response
 
         return {
             "success": True,
@@ -229,6 +223,27 @@ class RedisRepository:
             "gold_gained": int(result[4]),
             "accepted_clicks": int(result[5]),
         }
+
+
+
+    async def refill_click_buckets(self) -> None:
+        # SCAN은 같은 키를 중복 반환할 수 있어 set으로 중복 제거
+        bucket_keys = set()
+
+        async for key in self.redis.scan_iter(
+            match="rate_limit:click:*",
+            count=100,
+        ):
+            bucket_keys.add(key)
+
+        if not bucket_keys:
+            return
+
+        await self._refill_buckets_script(
+            keys=sorted(bucket_keys),
+            args=[self.BUCKET_CAPACITY, 4],
+        )
+
         
     async def levelup(self, player_id: str) -> dict:
         result = await self._levelup_script(
