@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from app.repositories.repository import RedisRepository
