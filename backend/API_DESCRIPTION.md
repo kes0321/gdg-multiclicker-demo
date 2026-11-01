@@ -1,7 +1,8 @@
 # 프론트엔드 연동용 API 명세
 
-작성일: 2026-10-27  
-기준 커밋: `43bee80db0b971ffa92958f8cefa7cfe89ffdc4c` (`feat: batch player click requests`)
+갱신일: 2026-11-01
+
+기준 커밋: `753a5d2d95cb26227c2ed50f7798f75605639b06` (`fix: import issue`)
 
 현재 소스 코드의 동작을 기준으로 작성했다. 예시의 호스트, 포트, 플레이어 ID와 시각은 설명용이며 실제 배포 주소는 별도로 설정해야 한다.
 
@@ -25,7 +26,7 @@
 - 브라우저 JavaScript에서 쿠키 값을 읽어 토큰을 관리할 필요가 없다. HTTP 요청 시 `credentials: "include"`를 사용하고, WebSocket 연결 시 브라우저가 해당 주소에 적용되는 쿠키를 자동 전송하도록 한다.
 - 세션 만료 시간은 유효한 세션으로 `POST /api/players`를 호출해 복원했을 때 연장된다. 조회 요청과 WebSocket 연결·메시지는 만료 시간을 연장하지 않는다.
 - WebSocket은 연결 시 세션을 확인한다. 연결 후 메시지마다 세션 만료를 재검사하지 않는다.
-- 현재 백엔드에는 CORS 미들웨어가 없고, 프론트엔드 `vite.config.ts`에도 API·WebSocket 프록시가 없다. 서로 다른 origin에서 바로 호출하려면 CORS와 쿠키 조건을 맞추는 별도 설정이 필요하다. 동일 origin에서 `/api`와 `/ws`를 백엔드로 전달하는 구성이 연동에 적합하다. `credentials` 설정만으로 CORS 또는 `SameSite` 제한이 해소되지는 않는다.
+- 현재 백엔드에는 CORS 미들웨어가 없다. 프론트엔드 `vite.config.ts`는 `/api`와 `/ws`를 `BACKEND_URL`(기본값 `http://localhost:8000`)로 프록시하며 `/ws`의 WebSocket 전달을 지원한다. 브라우저에서는 프론트엔드 origin의 상대 경로를 사용한다. 백엔드를 서로 다른 origin에서 직접 호출하려면 CORS와 쿠키 조건을 맞추는 별도 설정이 필요하다. `credentials` 설정만으로 CORS 또는 `SameSite` 제한이 해소되지는 않는다.
 
 ### 권장 호출 순서
 
@@ -34,7 +35,7 @@
 3. `connected` 메시지의 `player`로 최신 상태를 반영한다.
 4. 클릭은 `click` 또는 `click_batch`, 업그레이드는 `levelup` 메시지로 전송한다.
 5. 서버 응답의 최종 `score`, `level`, `total_clicks`를 화면 상태에 반영한다. 응답에 없는 필드는 기존 값을 유지한다.
-6. 리더보드는 `GET /api/leaderboard`로 별도 갱신한다. 서버가 랭킹 변경을 방송하지 않으므로 필요하면 프론트엔드에서 주기적으로 조회한다. 조회 주기는 API에 규정되어 있지 않다.
+6. 접속자 리더보드는 WebSocket `leaderboard` 방송으로 갱신한다. 전체 플레이어 기준 상위 랭킹이 필요하면 `GET /api/leaderboard`를 별도로 호출한다. 두 목록은 대상과 동점 정렬 규칙이 다르다.
 
 ## 2. 데이터 모델과 게임 규칙
 
@@ -62,8 +63,9 @@
 
 ### 골드와 레벨 계산
 
-- 단일 클릭: `획득 골드 = 처리 시점의 level`, `total_clicks += 1`.
-- 배치 클릭: `획득 골드 = 처리 시점의 level × count`, `total_clicks += count`.
+- 승인된 단일 클릭: `획득 골드 = 처리 시점의 level`, `total_clicks += 1`.
+- 승인된 배치 클릭: `획득 골드 = 처리 시점의 level × count`, `total_clicks += count`.
+- 클릭 1회당 토큰 1개를 소비한다. 단일 클릭과 배치 클릭은 플레이어별 버킷을 공유하며, 토큰이 부족하면 요청 전체를 거절한다. 상세 충전 규칙과 실패 응답은 4.4절을 참고한다.
 - 레벨업 비용: `현재 level × 100`. 잔액이 충분하면 비용을 차감하고 레벨을 1 올린다. `total_clicks`는 변하지 않는다.
 - 예: 레벨 1에서 100골드를 쓰면 레벨 2가 되고, 다음 비용은 200골드이다.
 - 랭킹은 현재 보유 골드 내림차순이다. 레벨업으로 골드를 사용하면 순위가 내려갈 수 있다.
@@ -75,7 +77,7 @@
 | --- | --- | --- | --- |
 | `POST` | `/api/players` | 플레이어 생성 또는 세션 복원 | 선택 |
 | `GET` | `/api/players/{player_id}` | 플레이어 상세 조회 | 아니요 |
-| `GET` | `/api/leaderboard` | 상위 랭킹 조회 | 아니요 |
+| `GET` | `/api/leaderboard` | 접속 여부와 무관한 전체 플레이어 상위 랭킹 조회 | 아니요 |
 | `GET` | `/api/health` | Redis 연결 상태 확인 | 아니요 |
 | `GET` | `/hello` | Redis 읽기·쓰기 데모 | 아니요 |
 | `GET` | `/counter` | 공용 카운터 증가 데모 | 아니요 |
@@ -145,16 +147,17 @@
 ```json
 {
   "players": [
-    {"rank": 1, "player_id": "p0123456789abcdef0123456789abcdef", "score": 1500},
-    {"rank": 2, "player_id": "pabcdef0123456789abcdef0123456789", "score": 900}
+    {"rank": 1, "player_id": "p0123456789abcdef0123456789abcdef", "nickname": "빵굽는고양이", "score": 1500},
+    {"rank": 2, "player_id": "pabcdef0123456789abcdef0123456789", "nickname": "우주토끼", "score": 900}
   ]
 }
 ```
 
-- 각 항목은 `rank`(integer, 1부터 시작), `player_id`(string), `score`(integer)만 포함한다.
+- 각 항목은 `rank`(integer, 1부터 시작), `player_id`(string), `nickname`(string), `score`(integer)를 포함한다. 닉네임 조회 결과가 없으면 `"Unknown"`을 사용한다.
+- 접속 여부와 무관하게 Redis 전체 리더보드의 상위 `limit`명을 반환한다. WebSocket의 접속자 리더보드와 구분한다.
 - 플레이어가 없으면 `{"players": []}`이다. 전체 인원과 내 순위는 별도 제공하지 않는다.
 - 동점이어도 공동 순위를 부여하지 않고 1, 2, 3처럼 연속 순위를 반환한다. 현재 `ZREVRANGE` 동작에 따라 동점은 `player_id`의 역 사전순으로 정렬된다.
-- 닉네임이 필요하면 각 ID로 플레이어 상세를 조회하고 캐시할 수 있다.
+- 닉네임은 응답에 포함되므로 이름 표시를 위한 플레이어 상세 조회는 필요하지 않다.
 - 오류: `422` / `limit` 검증 실패, `503` / `랭킹 조회 실패`.
 
 ### 3.4. 상태 확인
@@ -212,7 +215,9 @@
 }
 ```
 
-모든 클라이언트 메시지는 **텍스트 JSON 객체**로 전송한다. 서버는 연결별로 메시지를 순서대로 처리한다. 요청 ID와 응답 ID는 제공하지 않으므로 요청과 응답의 대응이 필요하면 클라이언트에서 순서를 관리한다.
+서버는 `connected` 전송 후 현재 프로세스에 등록된 모든 연결에 `leaderboard`를 방송한다. 이후에도 접속자 변경과 성공한 게임 동작에 따라 방송이 도착한다.
+
+모든 클라이언트 메시지는 **텍스트 JSON 객체**로 전송한다. 서버는 연결별로 요청을 순서대로 처리하지만, 요청 응답 사이에 `leaderboard` 방송이 들어올 수 있다. 성공한 클릭·배치 클릭·레벨업은 리더보드 방송을 먼저 시도한 뒤 요청자에게 결과를 보낸다. 요청 ID와 응답 ID는 제공하지 않으므로 클라이언트는 메시지의 `type`으로 방송과 동작 결과를 구분하고, 필요한 요청·응답 순서를 관리한다.
 
 ### 4.2. 단일 클릭
 
@@ -227,15 +232,17 @@
 ```json
 {
   "type": "click_result",
+  "success": true,
   "player_id": "p0123456789abcdef0123456789abcdef",
   "score": 1,
   "level": 1,
   "total_clicks": 1,
-  "gold_gained": 1
+  "gold_gained": 1,
+  "accepted_clicks": 1
 }
 ```
 
-`score`, `level`, `total_clicks`는 처리 후 최종 상태이며 `gold_gained`는 이번 요청의 획득 골드다. 단일 클릭 응답에는 `success` 필드가 없다.
+`score`, `level`, `total_clicks`는 처리 후 최종 상태이며 `gold_gained`는 이번 요청의 획득 골드다. 단일 클릭은 내부적으로 `count=1`인 배치 클릭으로 처리하므로 성공 응답에 `success: true`, `accepted_clicks: 1`을 포함한다. 토큰 부족 시 4.4절의 `click_result` 실패 응답을 반환한다.
 
 ### 4.3. 배치 클릭
 
@@ -262,7 +269,7 @@
 }
 ```
 
-`accepted_clicks`는 이번에 처리한 클릭 수이며 현재 구현은 유효한 요청의 `count` 전체를 처리한다. `gold_gained`는 클릭 한 번의 골드가 아닌 배치 전체의 획득량이다.
+`accepted_clicks`는 이번에 처리한 클릭 수다. 토큰이 충분하면 `count` 전체를 처리하고, 부족하면 전체를 거절한다. 일부 클릭만 승인하지 않는다. `gold_gained`는 클릭 한 번의 골드가 아닌 배치 전체의 획득량이다.
 
 입력 오류 응답:
 
@@ -270,14 +277,54 @@
 {
   "type": "click_batch_result",
   "success": false,
-  "code": "INVALID_BATCH_COUNT",
-  "message": "count must be an integer between 1 and 10"
+  "code": "INVALID_BATCH_COUNT"
 }
 ```
 
-입력 오류는 상태를 변경하지 않으며 연결을 유지한다.
+입력 오류는 상태를 변경하지 않으며 연결을 유지한다. `message` 필드는 포함하지 않는다.
 
-### 4.4. 레벨업
+### 4.4. 클릭 속도 제한
+
+단일 클릭과 배치 클릭에 동일한 플레이어별 토큰 버킷을 적용한다.
+
+| 항목 | 현재 동작 |
+| --- | --- |
+| 버킷 용량·신규 생성 시 토큰 | 30개 |
+| 소비량 | 클릭 1회당 1개, 배치는 `count`개 |
+| 충전 | 서버 백그라운드 작업이 0.5초 간격으로 기존 버킷에 4개씩 추가, 최대 30개 |
+| 버킷 유효기간 | 생성 또는 클릭 승인 후 60초 |
+| 버킷 만료 후 클릭 | 30개로 초기화한 뒤 요청 클릭 수만큼 소비 |
+| 토큰 부족 | 클릭·골드·랭킹·토큰을 변경하지 않고 요청 전체 거절, 연결 유지 |
+
+정상적으로 충전 작업이 실행될 때 명목 충전량은 초당 8개이며, 초기·누적 토큰으로 순간적으로 더 많은 클릭을 처리할 수 있다. 따라서 고정된 1초 구간마다 최대 8회를 허용하는 방식은 아니다. 충전 작업이 지연되면 밀린 충전을 연속 실행하지 않으며, 클릭 요청 자체는 경과 시간에 따른 충전을 하지 않는다.
+
+버킷은 `player_id` 기준이므로 같은 플레이어의 여러 탭·연결이 토큰을 공유한다. 세션 복원이나 WebSocket 재연결로 기존 버킷을 초기화하지 않는다. 충전과 거절된 클릭은 버킷 유효기간을 연장하지 않는다. 레벨업에는 이 토큰 제한을 적용하지 않는다.
+
+단일 클릭의 토큰 부족 응답:
+
+```json
+{
+  "type": "click_result",
+  "success": false,
+  "code": "RATE_LIMITED",
+  "remaining_tokens": 0
+}
+```
+
+배치 클릭의 토큰 부족 응답, `count=3`을 요청했으나 토큰이 2개인 예:
+
+```json
+{
+  "type": "click_batch_result",
+  "success": false,
+  "code": "RATE_LIMITED",
+  "remaining_tokens": 2
+}
+```
+
+`remaining_tokens`는 거절 시점의 잔여 토큰이며 현재 골드나 클릭 수가 아니다. 실패 응답에는 `player_id`, `score`, `level`, `total_clicks`, `gold_gained`, `accepted_clicks`, `message`, 재시도 대기 시간 필드가 없다. 클라이언트는 실패한 클릭을 획득량에 반영하지 않고, 예측 반영한 상태가 있다면 서버 상태에 맞춰 보정한다. 토큰 잔량 조회나 충전 완료 알림 API는 제공하지 않는다.
+
+### 4.5. 레벨업
 
 클라이언트 → 서버:
 
@@ -314,7 +361,31 @@
 
 `required_gold`는 부족분이 아닌 업그레이드에 필요한 전체 비용이다. 실패 시 골드와 레벨을 변경하지 않으며 연결을 유지한다.
 
-### 4.5. 공통 메시지 오류
+### 4.6. 접속자 리더보드 방송
+
+서버 → 현재 프로세스에 등록된 모든 WebSocket 연결:
+
+```json
+{
+  "type": "leaderboard",
+  "players": [
+    {"rank": 1, "player_id": "p0123456789abcdef0123456789abcdef", "nickname": "빵굽는고양이", "score": 1500},
+    {"rank": 2, "player_id": "pabcdef0123456789abcdef0123456789", "nickname": "우주토끼", "score": 900}
+  ]
+}
+```
+
+- 방송 대상 목록은 해당 프로세스에 연결된 플레이어만 포함한다. 여러 탭으로 접속한 플레이어는 한 번만 표시하며, 마지막 연결이 제거되면 이후 목록에서 제외한다.
+- 항목 필드는 HTTP 리더보드와 같은 `rank`, `player_id`, `nickname`, `score`이다. 닉네임이 없으면 `"Unknown"`을 사용하고, Redis 리더보드에 점수가 없는 플레이어는 제외한다.
+- 보유 골드 내림차순, 동점이면 `player_id` 오름차순으로 정렬한다. 순위는 이 접속자 목록 내에서 1부터 연속으로 매긴다. HTTP 전체 랭킹의 동점 정렬과 다르다.
+- 서버 측 상위 인원수 제한이나 `limit` 옵션은 없다. 전체 인원 수·개인 전체 순위·레벨·누적 클릭 수는 포함하지 않는다.
+- 연결 등록 및 `connected` 전송 후, 성공한 단일 클릭·배치 클릭·레벨업 후, 등록된 연결의 종료 정리 후 방송을 시도한다. 잘못된 메시지, 토큰 부족, 골드 부족은 방송을 유발하지 않는다.
+- 주기적으로 방송하는 방식이 아니며, 구독 요청 메시지도 필요하지 않다. 목록이 오면 기존 접속자 목록 전체를 교체한다.
+- 방송용 Redis 조회가 실패하면 로그를 남기고 해당 방송을 건너뛴다. 이미 성공한 게임 상태 변경을 되돌리지 않으며 요청자의 결과 응답은 계속 시도한다.
+
+연결 관리자는 프로세스 메모리를 사용하며 프로세스 간 방송을 공유하는 기능은 없다. 다중 워커나 여러 서버에서는 각 프로세스가 관리하는 연결 범위의 접속자 목록을 받는다. 충전 작업도 프로세스마다 시작되므로, 여러 프로세스가 같은 Redis를 사용하면 토큰 충전량이 중복될 수 있다.
+
+### 4.7. 공통 메시지 오류
 
 | 입력 상황 | 서버 응답 | 연결 |
 | --- | --- | --- |
@@ -324,21 +395,22 @@
 
 `click`과 `levelup`은 `type`만으로 처리하며, 메시지에 임의의 점수나 레벨을 넣어도 게임 상태를 지정할 수 없다. 별도의 애플리케이션 `ping`/`pong` 메시지는 구현되어 있지 않다.
 
-### 4.6. 연결 거절·종료
+### 4.8. 연결 거절·종료
 
 | 상황 | 코드에서 지정하는 종료 코드 | reason |
 | --- | --- | --- |
 | 연결 시 쿠키 없음, 세션 무효·만료, 플레이어 없음 | `1008` | 지정하지 않음 |
 | 연결 후 클릭·배치 클릭·레벨업 대상 플레이어 없음 | `1008` | `Player not found` |
-| Redis 처리 오류 | `1011` | `Redis operation failed` |
+| 인증·게임 처리 중 Redis 오류 | `1011` | 지정하지 않음 |
+| 처리 중 `TimeoutError`·`OSError` 또는 방송 전송 실패로 연결 제거 | `1001` | 지정하지 않음 |
 
 연결 수락 전 인증 실패는 `accept()` 전에 `close()`를 호출한다. ASGI 서버에서는 HTTP 핸드셰이크 거절(일반적으로 403)로 처리될 수 있어 브라우저에서 `1008`을 직접 받는다고 가정하면 안 된다. 연결 수락 전 Redis 오류도 정상 연결 후의 종료 프레임과 동일하게 관찰된다고 보장할 수 없다.
 
 플레이어가 사라진 경우 `PLAYER_NOT_FOUND` JSON 결과를 보내지 않고 연결을 종료한다. 연결이 끊기면 새 연결의 `connected.player` 또는 HTTP 조회로 상태를 다시 맞춘다. 응답을 받지 못한 클릭·레벨업이 이미 처리되었을 수 있으며, 요청 중복 방지 기능이 없으므로 자동 재전송 시 중복 처리될 수 있다.
 
-## 5. 기존 프론트엔드와의 매핑
+## 5. 프론트엔드 연동
 
-현재 `frontend/src/game-service.ts`는 로컬 목업이다. 연동 어댑터에서 다음 매핑을 적용한다.
+현재 `frontend/src/game-service.ts`의 `createApiGameService()`는 HTTP와 WebSocket을 사용하는 API 어댑터다. 다음 매핑으로 서버 상태를 화면에 반영한다.
 
 | 프론트엔드 필드·동작 | 백엔드 데이터·호출 |
 | --- | --- |
@@ -348,16 +420,17 @@
 | `level` | `level` |
 | `goldPerClick` | 현재 `level` |
 | `upgradeCost` | 현재 `level × 100` |
-| 최초 `getState()` | 생성·복원 응답 및 WebSocket `connected`, 리더보드 조회 조합 |
-| `click()` | WebSocket `click` 또는 클릭 누적 후 `click_batch` |
+| 최초 `getState()` | `POST /api/players` 생성·복원 후 WebSocket `connected`로 내 상태 초기화 |
+| `click(count)` | WebSocket `click_batch`, `count`는 1~10의 정수 |
 | `upgrade()` | WebSocket `levelup` |
-| 25명 리더보드 | `GET /api/leaderboard?limit=25` |
-| 리더보드 이름 | 각 `player_id`의 상세 조회에서 `nickname` 확보 |
+| 화면 리더보드 | WebSocket `leaderboard.players`에서 상위 25명 표시 |
+| 전체 플레이어 상위 25명 조회 | `GET /api/leaderboard?limit=25` (접속자 목록과 별도) |
+| 리더보드 이름 | 각 항목의 `nickname` |
 | 내 항목 구분 | 생성·복원된 내 `player_id`와 비교 |
 | `avatar` | API 제공 없음. 프론트엔드 기본 이미지 사용 가능 |
-| `ping` | API 제공 없음. 현재 목업의 24ms는 서버 측정값이 아님 |
+| `ping` | 전용 API 필드는 없음. 어댑터에서 동작 요청부터 결과 수신까지의 경과 시간을 측정하며, 측정 전에는 `null` |
 
-목업의 업그레이드 비용 증가식 `ceil(이전 비용 × 1.65)`는 서버 규칙과 다르다. 실제 연동에서는 `level × 100`을 사용해야 한다. 목업 초기 1,240골드와 달리 서버 신규 플레이어는 0골드로 시작한다.
+신규 플레이어는 0골드·레벨 1로 시작한다. 다음 업그레이드 비용은 `level × 100`이며, 클릭 성공 응답의 `accepted_clicks`와 최종 상태를 기준으로 예측 상태를 보정한다. `leaderboard` 방송은 요청 결과와 별도로 처리해야 하며, 접속자 목록의 도착을 `connected`와 같은 시점으로 가정하지 않는다.
 
 ### 브라우저 연결 예시
 
@@ -379,7 +452,7 @@ async function startGame(nickname: string) {
   const socket = new WebSocket(wsUrl);
   socket.addEventListener('message', (event) => {
     const message = JSON.parse(event.data);
-    // connected, click_result, click_batch_result, levelup_result, error 처리
+    // connected, leaderboard, click_result, click_batch_result, levelup_result, error 처리
     console.log(message);
   });
 
@@ -393,28 +466,21 @@ async function startGame(nickname: string) {
 
 ## 6. 현재 구현 범위와 참고 근거
 
-- 다른 플레이어의 변경 사항이나 내 다른 연결의 변경 사항을 WebSocket으로 방송하지 않는다. 여러 탭을 열면 별도 조회 등으로 상태 동기화가 필요하다.
-- 배치당 최대 10회 제한은 있지만 클릭 빈도를 제한하는 로직은 현재 클릭 처리 경로에 없다. 플레이어 생성 시 토큰 버킷 데이터를 만들지만 클릭 시 사용하지 않으므로 초당 제한이나 `RATE_LIMITED` 응답을 가정하지 않는다.
+- 다른 플레이어 및 내 다른 연결에서 성공한 동작의 골드 변경은 접속자 리더보드 방송에 반영된다. 다만 내 전체 Player 상태를 모든 탭에 방송하지는 않는다. 다른 탭의 레벨·누적 클릭 수까지 동기화하려면 플레이어 조회 또는 재연결의 `connected.player`로 확인한다.
+- 배치당 최대 10회 검증과 플레이어별 토큰 버킷 제한을 함께 적용한다. 단일 클릭도 동일한 제한을 사용한다. 성공한 클릭은 `app/repositories/scripts/click_batch.lua`에서 처리하며, `click.lua`는 현재 단일 클릭 API의 실행 경로가 아니다.
+- 요청 중복 방지·요청 ID·클라이언트별 처리 확인 번호는 제공하지 않는다. 결과를 받기 전에 연결이 끊기면 서버 상태를 확인한 뒤 후속 입력을 처리한다.
 - 로그아웃, 닉네임 변경, 플레이어 삭제, 내 정보 전용 조회, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다.
 - 자동 문서 기본 경로는 `/docs`, `/redoc`, OpenAPI JSON은 `/openapi.json`이다. WebSocket 메시지 계약은 이 문서를 참고한다. 현재 HTTP 라우트에는 상세 응답 모델이 선언되어 있지 않다.
 
 확인한 구현 파일:
 
-- `app/main.py`: 앱 구성, Redis 연결, 데모 HTTP 경로.
+- `app/main.py`: 앱 구성, Redis 연결, 토큰 충전 작업 수명주기, 데모 HTTP 경로.
 - `app/api/http.py`: HTTP 경로, 요청 검증, 쿠키, HTTP 오류.
 - `app/api/websocket.py`: 인증, 메시지 분기, 메시지 오류와 연결 종료.
-- `app/repositories/repository.py`: 응답 데이터 변환, 세션 기간, 랭킹 조회.
-- `app/repositories/scripts/create_player.lua`, `click.lua`, `click_batch.lua`, `levelup.lua`: 초기 상태와 게임 규칙.
-- `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 기존 목업 구조와 현재 개발 서버 설정.
-
-참고한 Git 기록:
-
-| 커밋 | 내용 | 명세 반영 |
-| --- | --- | --- |
-| `bc1e91b` | `init: backend` | 초기 HTTP 조회·상태 확인 구조 |
-| `8ea5728` | `feat: create player` | 플레이어 생성, 쿠키 세션 복원 |
-| `514909e` | `feat: player click` | WebSocket 연결과 단일 클릭 |
-| `3f8a01a` | `feat: player levelup` | 레벨업 비용·성공·잔액 부족 처리 |
-| `43bee80` | `feat: batch player click requests` | 배치 클릭 1~10회와 입력 검증 |
+- `app/services/connection_manager.py`: 프로세스 내 연결 관리, 접속자 중복 제거, 방송 및 전송 실패 처리.
+- `app/services/token_refill.py`: 0.5초 간격 충전 작업과 지연 처리.
+- `app/repositories/repository.py`: 응답 데이터 변환, 세션 기간, 전체·접속자 랭킹 조회, 클릭 경로 및 버킷 충전 호출.
+- `app/repositories/scripts/create_player.lua`, `click_batch.lua`, `levelup.lua`, `refill_buckets.lua`: 초기 상태, 클릭 제한, 게임 규칙, 토큰 충전.
+- `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 현재 API 어댑터와 개발 서버 프록시 설정.
 
 이 명세는 코드와 Git 기록을 정적으로 확인해 작성했으며, 실행 서버나 Redis를 통한 동작 검증은 수행하지 않았다.
