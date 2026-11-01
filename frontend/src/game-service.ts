@@ -7,6 +7,19 @@ export interface GameService {
 
 interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number }
 interface Ranking { rank: number; player_id: string; nickname: string; score: number }
+
+// Global rankings are an HTTP snapshot, independent of the online WebSocket list.
+export async function getGlobalLeaderboard(signal?: AbortSignal): Promise<Player[]> {
+  const response = await fetch('/api/leaderboard?limit=25', {
+    method: 'GET', credentials: 'include',
+    signal: AbortSignal.any([AbortSignal.timeout(10000), ...(signal ? [signal] : [])]),
+  });
+  const body = await response.json();
+  if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `랭킹 조회 실패 (${response.status})`);
+  return (body.players as Ranking[]).map(entry => ({
+    id: entry.player_id, name: entry.nickname, gold: entry.score, rank: entry.rank,
+  }));
+}
 interface ServerMessage {
   type: string; player?: ApiPlayer; score?: number; level?: number; total_clicks?: number;
   success?: boolean; code?: string; message?: string; players?: Ranking[];

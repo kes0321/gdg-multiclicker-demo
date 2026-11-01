@@ -5,6 +5,7 @@ import { theme } from './theme';
 import { createApiGameService, type GameService, type GameState } from './game-service';
 import { createClickBatcher } from './click-batcher';
 import { createClickPrediction } from './click-prediction';
+import { GlobalLeaderboard } from './global-leaderboard';
 import './styles.css';
 
 const number = (value: number) => value.toLocaleString('ko-KR');
@@ -36,6 +37,7 @@ function Game({ playerName }: { playerName: string }) {
   const [game, setGame] = useState<GameState>();
   const [bounce, setBounce] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [rankingOpen, setRankingOpen] = useState(false);
   const [error, setError] = useState('');
   const [particles, setParticles] = useState<{ id: number; x: number; y: number; value: number }[]>([]);
   const nextParticleId = useRef(0);
@@ -95,7 +97,7 @@ function Game({ playerName }: { playerName: string }) {
   }
 
   function reward(x: number, y: number) {
-    if (!game || error || busy) return;
+    if (!game || error || busy || rankingOpen) return;
     const id = nextParticleId.current++;
     setParticles(current => [...current.slice(-29), { id, x, y, value: game.goldPerClick }]);
     const timer = setTimeout(() => {
@@ -134,6 +136,7 @@ function Game({ playerName }: { playerName: string }) {
     {error && <div className="connection-error" role="alert">{error} <button onClick={retry}>다시 연결</button></div>}
 
     <section className="leaderboard" aria-label="리더보드">
+      <button className="global-ranking-trigger" onClick={() => setRankingOpen(true)} aria-haspopup="dialog">전체 랭킹</button>
       <div className="table-head"><span>순위</span><span>닉네임</span><span>골드</span></div>
       <ol className="rank-list">
         {game.leaderboard.map(player => <li className={`rank-row ${player.rank <= 3 ? `podium podium-${player.rank}` : ''} ${player.id === game.playerId ? 'is-me' : ''}`} key={player.id} aria-current={player.id === game.playerId ? 'true' : undefined}>
@@ -165,6 +168,7 @@ function Game({ playerName }: { playerName: string }) {
       <span className="upgrade-change"><span>{game.goldPerClick}</span><span className="upgrade-arrow">→</span><span>{game.goldPerClick+1}<small> G / 클릭</small></span></span>
     </button>
     {particles.map(particle => <span className="click-particle" key={particle.id} aria-hidden="true" style={{ left: particle.x, top: particle.y }}>+{number(particle.value)}<small> G</small></span>)}
+    {rankingOpen && <GlobalLeaderboard playerId={game.playerId} onClose={() => setRankingOpen(false)}/>}
   </main>;
 }
 
