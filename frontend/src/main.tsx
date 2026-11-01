@@ -175,7 +175,7 @@ function Game({ playerName }: { playerName: string }) {
 
     <button className="upgrade-button" disabled={!!error || busy || game.upgradeCost === null || game.gold < game.upgradeCost} onClick={upgrade} aria-label="업그레이드" aria-busy={busy}>
       <span className="upgrade-top"><span>Lv. {game.level}</span><strong>{game.upgradeCost === null ? 'MAX' : `${number(game.upgradeCost)} G`}</strong></span>
-      <span className="upgrade-change">{game.upgradeCost === null ? '최대 레벨 도달' : '레벨업'}</span>
+      <span className="upgrade-change upgrade-preview">{game.nextGoldPerClick === null ? '최대 레벨 도달' : <><span>레벨업</span><small>({number(game.goldPerClick)}G/클릭 → {number(game.nextGoldPerClick)}G/클릭)</small></>}</span>
     </button>
     {particles.map(particle => <span className="click-particle" key={particle.id} aria-hidden="true" style={{ left: particle.x, top: particle.y }}>+{number(particle.value)}<small> G</small></span>)}
     {rankingOpen && <GlobalLeaderboard playerId={game.playerId} onClose={() => setRankingOpen(false)}/>}

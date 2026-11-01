@@ -44,11 +44,12 @@
 | `player_id` | string | 서버가 생성하는 ID. 현재 형식은 `p` + UUID의 32자리 16진수 |
 | `nickname` | string | 양끝 공백을 제거한 닉네임, 1~20자 |
 | `score` | integer | 현재 보유 골드. 누적 획득량이 아니며 레벨업 시 감소 |
-| `level` | integer | 현재 레벨, 최초 1, 최대 30 |
+| `level` | integer | 현재 레벨, 최초 1, 최대 40 |
 | `total_clicks` | integer | 누적 처리된 클릭 수, 최초 0 |
 | `created_at_ms` | integer | 생성 시각, Unix epoch 밀리초 |
 | `gold_per_click` | integer | 현재 레벨의 클릭당 골드 `G(L)` |
-| `next_upgrade_cost` | integer 또는 null | 현재 레벨의 다음 업그레이드 비용 `C(L)`. 30레벨이면 `null` |
+| `next_gold_per_click` | integer 또는 null | 다음 레벨의 클릭당 골드 `G(L+1)`. 40레벨이면 `null` |
+| `next_upgrade_cost` | integer 또는 null | 현재 레벨의 다음 업그레이드 비용 `C(L)`. 40레벨이면 `null` |
 
 ```json
 {
@@ -59,6 +60,7 @@
   "total_clicks": 0,
   "created_at_ms": 1793062800000,
   "gold_per_click": 10,
+  "next_gold_per_click": 12,
   "next_upgrade_cost": 100
 }
 ```
@@ -66,16 +68,17 @@
 ### 골드와 레벨 계산
 
 - 클릭당 골드: `G(L) = floor(10 × 1.25^(L - 1))`.
-- 다음 레벨로 올라가는 비용: `C(L) = ceil(100 × 1.6^(L - 1))`, 단 최대 레벨 30에서는 `null`.
+- 다음 레벨로 올라가는 비용: `C(L) = ceil(100 × 1.6^(L - 1))`.
 - 승인된 단일 클릭: `획득 골드 = G(처리 시점의 level)`, `total_clicks += 1`.
 - 승인된 배치 클릭: `획득 골드 = G(처리 시점의 level) × accepted_clicks`, `total_clicks += accepted_clicks`.
 - 클릭 1회당 토큰 1개를 소비한다. 단일 클릭과 배치 클릭은 플레이어별 버킷을 공유하며, 토큰이 부족하면 요청 전체를 거절한다. 상세 충전 규칙과 실패 응답은 4.4절을 참고한다.
-- 레벨업은 잔액이 충분하면 `C(L)`을 차감하고 레벨을 1 올린다. `total_clicks`는 변하지 않는다. 30레벨에서는 클릭 보상을 유지하고 레벨업을 `MAX_LEVEL_REACHED`로 거절한다.
+- 레벨업은 잔액이 충분하면 `C(L)`을 차감하고 레벨을 1 올린다. `total_clicks`는 변하지 않는다. 최대 40레벨에서는 클릭 보상 60,185골드를 유지하며 레벨업을 `MAX_LEVEL_REACHED`로 거절한다. 다음 보상·비용은 모두 `null`이다.
 - 예: 레벨 1에서는 클릭당 10골드이며 100골드를 쓰면 레벨 2가 된다. 레벨 2에서는 클릭당 12골드, 다음 비용은 160골드이다.
 - 랭킹은 현재 보유 골드 내림차순이다. 레벨업으로 골드를 사용하면 순위가 내려갈 수 있다.
 - 클릭과 레벨업은 각각 Redis Lua 스크립트에서 상태와 랭킹을 함께 갱신한다.
-- `app/balance.py`에서 문자열 계수와 `Decimal`로 생성한 정수 테이블을 응답과 Lua가 공유한다. Lua는 Redis에서 읽은 현재 레벨로 계산한다. 파생 필드는 Redis에 중복 저장하지 않는다.
-- 기존 골드·레벨은 초기화하지 않는다. 저장된 레벨이 1~30 범위를 벗어나거나 유효한 정수가 아니면 자동 보정하지 않고 `INVALID_PLAYER_LEVEL` 오류와 서버 로그로 알린다. 해당 플레이어의 상태 변경은 거절한다.
+- `app/balance.py`의 `MAX_LEVEL = 40`을 Python과 Lua가 공유한다. 문자열 계수와 `Decimal`로 필요한 레벨의 정수 값을 계산하고 캐시하며, 응답과 Lua가 공유한다. Lua는 Redis의 현재 레벨에 해당하는 값이 필요하면 쓰기 없이 서버에 요청하고, 서버가 계산한 값을 전달받은 뒤 실제 레벨을 다시 확인한다. 도중에 다른 연결이 레벨업했다면 새 레벨의 값을 다시 요청한다. 파생 필드는 Redis에 중복 저장하지 않는다.
+- 기존 골드·레벨은 초기화하지 않는다. 저장된 레벨이 1~40 범위를 벗어나거나 유효한 정수가 아니면 자동 보정하지 않고 `INVALID_PLAYER_LEVEL` 오류와 서버 로그로 알린다. 해당 플레이어의 상태 변경은 거절한다.
+- 현재 Lua·JavaScript·랭킹 점수에서 정수를 정확하게 표현하는 범위는 `2^53 - 1`까지다. 만렙 이후에도 골드·클릭 수는 누적되므로, 상태 변경 결과가 이 범위를 벗어나면 기존 `NUMERIC_LIMIT_EXCEEDED` 보호로 거절한다.
 
 | 현재 레벨 | 클릭당 골드 | 다음 업그레이드 비용 |
 | --- | ---: | ---: |
@@ -84,9 +87,12 @@
 | 5 | 24 | 656 |
 | 10 | 74 | 6,872 |
 | 15 | 227 | 72,058 |
-| 30 | 6,462 | null |
+| 30 | 6,462 | 83,076,750 |
+| 31 | 8,077 | 132,922,800 |
+| 39 | 48,148 | 5,708,990,771 |
+| 40 | 60,185 | null |
 
-Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치·레벨업 성공 결과는 모두 현재 응답 레벨 기준의 `gold_per_click`, `next_upgrade_cost`를 포함한다. 랭킹 항목은 기존 필드를 유지한다.
+Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치·레벨업 성공 결과는 모두 현재 응답 레벨 기준의 `gold_per_click`, `next_gold_per_click`, `next_upgrade_cost`를 포함한다. `next_gold_per_click`은 해당 응답 레벨에서 한 단계 더 올라갔을 때의 보상이며, 초기 접속부터 레벨업 버튼의 보상 미리보기에 사용한다. 랭킹 항목은 기존 필드를 유지한다.
 
 ## 3. HTTP API
 
@@ -129,6 +135,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
     "total_clicks": 0,
     "created_at_ms": 1793062800000,
     "gold_per_click": 10,
+    "next_gold_per_click": 12,
     "next_upgrade_cost": 100
   }
 }
@@ -142,6 +149,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 | --- | --- |
 | `422` | 닉네임 누락, 타입·길이 오류, 잘못된 JSON 등 요청 검증 실패 |
 | `409` | `{"code":"INVALID_PLAYER_LEVEL"}`. 기존 세션의 플레이어 레벨 오류이며 새 플레이어로 대체하지 않음 |
+| `409` | `{"code":"NUMERIC_LIMIT_EXCEEDED"}`. 기존 플레이어의 표시값이 정확한 정수 표현 범위를 초과함 |
 | `500` | `생성된 플레이어를 조회할 수 없습니다.` |
 | `503` | `Redis 처리 실패` |
 
@@ -154,6 +162,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 - 세션 없이 다른 플레이어도 조회할 수 있다.
 - 오류: `404` / `플레이어가 없습니다.`, `503` / `플레이어 조회 실패`.
 - 저장된 레벨 오류: `409`, `{"detail":{"code":"INVALID_PLAYER_LEVEL"}}`.
+- 정확한 정수 표현 범위 초과: `409`, `{"detail":{"code":"NUMERIC_LIMIT_EXCEEDED"}}`.
 
 ### 3.3. 리더보드 조회
 
@@ -198,7 +207,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 
 ### HTTP 오류 형식
 
-일반적인 HTTP 오류는 다음 형식이다. 저장된 레벨 오류의 `detail`은 위의 코드 객체 형식을 사용한다.
+일반적인 HTTP 오류는 다음 형식이다. 저장된 레벨 또는 숫자 범위 오류의 `detail`은 위의 코드 객체 형식을 사용한다.
 
 ```json
 {"detail": "플레이어가 없습니다."}
@@ -233,6 +242,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
     "total_clicks": 0,
     "created_at_ms": 1793062800000,
     "gold_per_click": 10,
+    "next_gold_per_click": 12,
     "next_upgrade_cost": 100
   }
 }
@@ -263,6 +273,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
   "gold_gained": 10,
   "accepted_clicks": 1,
   "gold_per_click": 10,
+  "next_gold_per_click": 12,
   "next_upgrade_cost": 100
 }
 ```
@@ -292,6 +303,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
   "gold_gained": 30,
   "accepted_clicks": 3,
   "gold_per_click": 10,
+  "next_gold_per_click": 12,
   "next_upgrade_cost": 100
 }
 ```
@@ -370,11 +382,12 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
   "level": 2,
   "gold_spent": 100,
   "gold_per_click": 12,
+  "next_gold_per_click": 15,
   "next_upgrade_cost": 160
 }
 ```
 
-`gold_spent`는 이번에 사용한 골드다. `gold_per_click`과 `next_upgrade_cost`는 상승한 레벨을 기준으로 반환한다. 성공 응답에는 `total_clicks`가 없으므로 기존 클릭 수를 유지한다. 프론트엔드는 비용이나 클릭 보상을 자체 계산하지 않는다.
+`gold_spent`는 이번에 사용한 골드다. `gold_per_click`, `next_gold_per_click`, `next_upgrade_cost`는 상승한 레벨을 기준으로 반환한다. 성공 응답에는 `total_clicks`가 없으므로 기존 클릭 수를 유지한다. 프론트엔드는 비용이나 클릭 보상을 자체 계산하지 않는다.
 
 골드 부족 응답, 레벨 1·50골드인 예:
 
@@ -398,13 +411,26 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
   "success": false,
   "code": "MAX_LEVEL_REACHED",
   "score": 50,
-  "level": 30,
-  "gold_per_click": 6462,
+  "level": 40,
+  "gold_per_click": 60185,
+  "next_gold_per_click": null,
   "next_upgrade_cost": null
 }
 ```
 
-최대 레벨 거절은 상태를 변경하지 않으며 연결을 유지한다. 이후에도 클릭은 가능하다.
+최대 레벨 거절은 골드·레벨·클릭 수·토큰·랭킹을 변경하지 않으며 연결을 유지한다. 일반·배치 클릭은 계속 가능하다.
+
+정확한 정수 표현 범위를 초과하는 동작의 거절 응답:
+
+```json
+{
+  "type": "levelup_result",
+  "success": false,
+  "code": "NUMERIC_LIMIT_EXCEEDED"
+}
+```
+
+숫자 범위 초과 거절은 토큰·골드·클릭 수·레벨·랭킹을 변경하지 않으며 연결을 유지한다. 클릭·배치 클릭도 해당 `*_result` 타입으로 같은 오류 코드를 반환할 수 있다.
 
 ### 4.6. 접속자 리더보드 방송
 
@@ -447,6 +473,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 | --- | --- | --- |
 | 연결 시 쿠키 없음, 세션 무효·만료, 플레이어 없음 | `1008` | 지정하지 않음 |
 | 연결 시 저장된 플레이어 레벨 오류 | `1008` | `INVALID_PLAYER_LEVEL` |
+| 연결 시 플레이어 표시값의 숫자 범위 초과 | `1008` | `NUMERIC_LIMIT_EXCEEDED` |
 | 연결 후 클릭·배치 클릭·레벨업 대상 플레이어 없음 | `1008` | `Player not found` |
 | 인증·게임 처리 중 Redis 오류 | `1011` | 지정하지 않음 |
 | 처리 중 `TimeoutError`·`OSError` 또는 방송 전송 실패로 연결 제거 | `1001` | 지정하지 않음 |
@@ -466,7 +493,8 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 | `gold` | `score` |
 | `level` | `level` |
 | `goldPerClick` | 서버의 `gold_per_click` |
-| `upgradeCost` | 서버의 `next_upgrade_cost`. `null`이면 최대 레벨 표시 및 업그레이드 비활성화 |
+| `nextGoldPerClick` | 서버의 `next_gold_per_click`. 레벨업 버튼에 현재 → 다음 보상을 표시 |
+| `upgradeCost` | 서버의 `next_upgrade_cost`. 잔액이 부족하거나 `null`이면 업그레이드 비활성화. `null`이면 MAX·최대 레벨 도달 표시 |
 | 최초 `getState()` | `POST /api/players` 생성·복원 후 WebSocket `connected`로 내 상태 초기화 |
 | `click(count)` | WebSocket `click_batch`, `count`는 1~10의 정수 |
 | `upgrade()` | WebSocket `levelup` |
@@ -527,8 +555,8 @@ async function startGame(nickname: string) {
 - `app/services/connection_manager.py`: 프로세스 내 연결 관리, 접속자 중복 제거, 방송 및 전송 실패 처리.
 - `app/services/token_refill.py`: 0.5초 간격 충전 작업과 지연 처리.
 - `app/repositories/repository.py`: 응답 데이터 변환, 세션 기간, 전체·접속자 랭킹 조회, 클릭 경로 및 버킷 충전 호출.
-- `app/balance.py`: Decimal 기반 성장 테이블과 공통 응답 필드, Lua 테이블 주입.
+- `app/balance.py`: Decimal 기반 레벨별 성장값 생성·캐시, 공통 응답 필드와 숫자 범위 확인, Lua 값 전달 지원.
 - `app/repositories/scripts/create_player.lua`, `click_batch.lua`, `levelup.lua`, `refill_buckets.lua`: 초기 상태, 클릭 제한, 게임 규칙, 토큰 충전.
 - `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 현재 API 어댑터와 개발 서버 프록시 설정.
 
-성장 규칙은 `backend`에서 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`로 검증할 수 있다. 테스트는 기본적으로 로컬 Redis DB 15의 고유 테스트 키만 사용하고 정리하며, `REDIS_TEST_URL`로 테스트 접속 주소를 지정할 수 있다. 실제 Redis/Lua 및 HTTP·WebSocket ASGI 경로를 통해 기준값, 거절 시 상태 유지, 동시 처리와 응답 일치를 검증했다.
+성장 규칙은 `backend`에서 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`로 검증할 수 있다. 테스트는 기본적으로 로컬 Redis DB 15의 고유 테스트 키만 사용하고 정리하며, `REDIS_TEST_URL`로 테스트 접속 주소를 지정할 수 있다. 수식은 1~40레벨에서 독립적인 정확한 분수 계산과 비교하고, 실제 Redis/Lua 및 HTTP·WebSocket ASGI 경로로 39→40, 동시 레벨업 시 40 초과 방지, 만렙 클릭·배치 보상, 거절 시 상태 유지와 응답 일치를 검증한다.

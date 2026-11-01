@@ -1,11 +1,11 @@
 export interface Player { id: string; name: string; gold: number; rank: number }
-export interface GameState { playerId: string; gold: number; goldPerClick: number; upgradeCost: number | null; level: number; leaderboard: Player[]; ping: number | null }
+export interface GameState { playerId: string; gold: number; goldPerClick: number; nextGoldPerClick: number | null; upgradeCost: number | null; level: number; leaderboard: Player[]; ping: number | null }
 export interface GameService {
   getState(): Promise<GameState>; click(count: number): Promise<GameState>; upgrade(): Promise<GameState>; dispose(): void;
   subscribe(onLeaderboard: (players: Player[], onlineCount: number) => void, onError: (error: Error) => void): () => void;
 }
 
-interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number; gold_per_click: number; next_upgrade_cost: number | null }
+interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number; gold_per_click: number; next_gold_per_click: number | null; next_upgrade_cost: number | null }
 interface Ranking { rank: number; player_id: string; nickname: string; score: number }
 
 // Global rankings are an HTTP snapshot, independent of the online WebSocket list.
@@ -22,7 +22,7 @@ export async function getGlobalLeaderboard(signal?: AbortSignal): Promise<Player
 }
 interface ServerMessage {
   type: string; player?: ApiPlayer; score?: number; level?: number; total_clicks?: number;
-  gold_per_click?: number; next_upgrade_cost?: number | null;
+  gold_per_click?: number; next_gold_per_click?: number | null; next_upgrade_cost?: number | null;
   success?: boolean; code?: string; message?: string; players?: Ranking[];
 }
 
@@ -49,6 +49,7 @@ export function createApiGameService(nickname: string): GameService {
   function snapshot(): GameState {
     if (!player) throw new Error('플레이어를 불러오는 중입니다.');
     return { playerId: player.player_id, gold: player.score, goldPerClick: player.gold_per_click,
+      nextGoldPerClick: player.next_gold_per_click,
       upgradeCost: player.next_upgrade_cost, level: player.level, leaderboard: [...leaderboard], ping };
   }
 
@@ -119,6 +120,7 @@ export function createApiGameService(nickname: string): GameService {
           if (message.level !== undefined) player.level = message.level;
           if (message.total_clicks !== undefined) player.total_clicks = message.total_clicks;
           if (message.gold_per_click !== undefined) player.gold_per_click = message.gold_per_click;
+          if (message.next_gold_per_click !== undefined) player.next_gold_per_click = message.next_gold_per_click;
           if (message.next_upgrade_cost !== undefined) player.next_upgrade_cost = message.next_upgrade_cost;
           ping = Math.round(performance.now() - pending.started);
           const operation = pending;

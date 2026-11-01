@@ -9,7 +9,7 @@ const { createApiGameService } = await import(`data:text/javascript;base64,${Buf
 
 test('HTTP session and WebSocket game contract', async t => {
   const original = { fetch: globalThis.fetch, window: globalThis.window, WebSocket: globalThis.WebSocket };
-  const player = { player_id: 'p-test', nickname: '복원된 닉네임', score: 150, level: 1, total_clicks: 0, gold_per_click: 10, next_upgrade_cost: 100 };
+  const player = { player_id: 'p-test', nickname: '복원된 닉네임', score: 150, level: 1, total_clicks: 0, gold_per_click: 10, next_gold_per_click: 12, next_upgrade_cost: 100 };
   const requests = [];
   const messages = [];
   const sockets = [];
@@ -52,15 +52,19 @@ test('HTTP session and WebSocket game contract', async t => {
         player.total_clicks += message.count;
         reply = { type: 'click_batch_result', success: true, accepted_clicks: message.count, ...player };
       } else if (player.next_upgrade_cost === null) {
-        reply = { type: 'levelup_result', success: false, code: 'MAX_LEVEL_REACHED',
-          score: player.score, level: player.level, gold_per_click: player.gold_per_click, next_upgrade_cost: null };
+        reply = { type: 'levelup_result', success: false, code: 'MAX_LEVEL_REACHED', score: player.score,
+          level: player.level, gold_per_click: player.gold_per_click, next_gold_per_click: null, next_upgrade_cost: null };
       } else if (player.score >= player.next_upgrade_cost) {
         player.score -= player.next_upgrade_cost;
         player.level++;
-        player.gold_per_click = 12;
-        player.next_upgrade_cost = 160;
+        const growth = player.level === 40
+          ? { gold_per_click: 60185, next_gold_per_click: null, next_upgrade_cost: null }
+          : player.level === 31
+          ? { gold_per_click: 8077, next_gold_per_click: 10097, next_upgrade_cost: 132922800 }
+          : { gold_per_click: 12, next_gold_per_click: 15, next_upgrade_cost: 160 };
+        Object.assign(player, growth);
         reply = { type: 'levelup_result', success: true, score: player.score, level: player.level,
-          gold_per_click: player.gold_per_click, next_upgrade_cost: player.next_upgrade_cost };
+          gold_per_click: player.gold_per_click, next_gold_per_click: player.next_gold_per_click, next_upgrade_cost: player.next_upgrade_cost };
       } else reply = { type: 'levelup_result', success: false, code: 'INSUFFICIENT_GOLD', score: player.score };
       queueMicrotask(() => {
         this.emit({ type: 'leaderboard', players: [{ rank: 1, ...player }] });
@@ -82,6 +86,7 @@ test('HTTP session and WebSocket game contract', async t => {
     const state = await service.getState();
     assert.equal(state.gold, 150);
     assert.equal(state.goldPerClick, 10);
+    assert.equal(state.nextGoldPerClick, 12);
     assert.equal(state.upgradeCost, 100);
     assert.equal(state.playerId, player.player_id);
     assert.equal(state.leaderboard[0].name, player.nickname);
@@ -100,6 +105,7 @@ test('HTTP session and WebSocket game contract', async t => {
     assert.equal(upgraded.gold, 60);
     assert.equal(upgraded.level, 2);
     assert.equal(upgraded.goldPerClick, 12);
+    assert.equal(upgraded.nextGoldPerClick, 15);
     assert.equal(upgraded.upgradeCost, 160);
     assert.equal((await service.click(1)).gold, 72);
     assert.deepEqual(messages, [{ type: 'click_batch', count: 1 }, { type: 'levelup' }, { type: 'click_batch', count: 1 }]);
@@ -172,17 +178,45 @@ test('HTTP session and WebSocket game contract', async t => {
     assert.equal(errors.length, errorCount + 1);
     stop();
   });
-  await t.test('accepts null upgrade cost and keeps clicking after maximum level rejection', async () => {
-    Object.assign(player, { level: 30, gold_per_click: 6462, next_upgrade_cost: null });
+  await t.test('continues upgrading and showing server rewards beyond level 30', async () => {
+    Object.assign(player, { level: 30, score: 83076750, gold_per_click: 6462, next_gold_per_click: 8077, next_upgrade_cost: 83076750 });
     const state = await service.getState();
     assert.equal(state.goldPerClick, 6462);
-    assert.equal(state.upgradeCost, null);
-    await assert.rejects(service.upgrade(), /최대 레벨/);
+    assert.equal(state.upgradeCost, 83076750);
+    assert.equal(state.nextGoldPerClick, 8077);
+    const upgraded = await service.upgrade();
+    assert.equal(upgraded.level, 31);
+    assert.equal(upgraded.gold, 0);
+    assert.equal(upgraded.goldPerClick, 8077);
+    assert.equal(upgraded.nextGoldPerClick, 10097);
+    assert.equal(upgraded.upgradeCost, 132922800);
     const before = player.score;
     const clicked = await service.click(1);
-    assert.equal(clicked.gold, before + 6462);
+    assert.equal(clicked.gold, before + 8077);
+    assert.equal(clicked.upgradeCost, 132922800);
+    assert.equal(clicked.nextGoldPerClick, 10097);
+    assert.equal(clicked.goldPerClick, 8077);
+  });
+  await t.test('reaches level 40 with null previews and keeps clicking after rejected upgrades', async () => {
+    Object.assign(player, { level: 39, score: 5708990871, gold_per_click: 48148, next_gold_per_click: 60185, next_upgrade_cost: 5708990771 });
+    sockets.at(-1).close();
+    await new Promise(resolve => setImmediate(resolve));
+    const state = await service.getState();
+    assert.equal(state.level, 39);
+    assert.equal(state.nextGoldPerClick, 60185);
+    const upgraded = await service.upgrade();
+    assert.equal(upgraded.level, 40);
+    assert.equal(upgraded.gold, 100);
+    assert.equal(upgraded.goldPerClick, 60185);
+    assert.equal(upgraded.nextGoldPerClick, null);
+    assert.equal(upgraded.upgradeCost, null);
+    await assert.rejects(service.upgrade(), /최대 레벨/);
+    assert.equal((await service.getState()).gold, 100);
+    const clicked = await service.click(1);
+    assert.equal(clicked.gold, 60285);
+    assert.equal(clicked.goldPerClick, 60185);
+    assert.equal(clicked.nextGoldPerClick, null);
     assert.equal(clicked.upgradeCost, null);
-    assert.equal(clicked.goldPerClick, 6462);
   });
   await t.test('disposes the socket and prevents further requests', async () => {
     service.dispose();

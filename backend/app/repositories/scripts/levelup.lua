@@ -1,6 +1,7 @@
 -- KEYS[1]: player:<player_id>
 -- KEYS[2]: leaderboard
 -- ARGV[1]: player_id
+-- ARGV[2]: Decimal로 생성한 현재 레벨의 보상·비용 JSON
 
 if redis.call("EXISTS", KEYS[1]) == 0 then
     return {0, "PLAYER_NOT_FOUND"}
@@ -21,24 +22,32 @@ if not score or not level
     return redis.error_reply("INVALID_PLAYER_DATA")
 end
 
+if score > MAX_SAFE_INTEGER then
+    return {0, "NUMERIC_LIMIT_EXCEEDED"}
+end
+if level == MAX_LEVEL then
+    return {0, "MAX_LEVEL_REACHED", score, level}
+end
+
+local balance = read_balance(level, ARGV[2])
+if not balance then
+    return {0, "BALANCE_REQUIRED", level}
+end
+
 local leaderboard_type = redis.call("TYPE", KEYS[2]).ok
 
 if leaderboard_type ~= "none" and leaderboard_type ~= "zset" then
     return redis.error_reply("INVALID_LEADERBOARD_TYPE")
 end
 
-if level == MAX_LEVEL then
-    return {0, "MAX_LEVEL_REACHED", score, level}
-end
-
-local cost = UPGRADE_COST[level]
+local cost = balance.next_upgrade_cost
 
 -- 잔액이 부족하면 아무것도 변경하지 않음
 if score < cost then
     return {0, "INSUFFICIENT_GOLD", score, cost}
 end
 
-local new_score = redis.call("HINCRBY", KEYS[1], "score", -cost)
+local new_score = redis.call("HINCRBY", KEYS[1], "score", string.format("%.0f", -cost))
 local new_level = redis.call("HINCRBY", KEYS[1], "level", 1)
 
 redis.call("ZADD", KEYS[2], new_score, ARGV[1])

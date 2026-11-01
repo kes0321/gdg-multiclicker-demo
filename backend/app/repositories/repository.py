@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import TypedDict
 
 from redis.asyncio import Redis
@@ -8,7 +9,10 @@ from secrets import token_urlsafe
 from time import time_ns
 from uuid import uuid4
 
-from app.balance import InvalidPlayerLevel, LUA_BALANCE_TABLES, balance_for_level
+from app.balance import (
+    InvalidPlayerLevel, NumericLimitExceeded, LUA_BALANCE_HELPER,
+    safe_balance_for_level,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,7 @@ class Player(TypedDict):
     total_clicks: int
     created_at_ms: int
     gold_per_click: int
+    next_gold_per_click: int | None
     next_upgrade_cost: int | None
 
 
@@ -50,17 +55,17 @@ class RedisRepository:
         
         click_path = Path(__file__).parent / "scripts" / "click.lua"
         self._click_script = redis.register_script(
-            LUA_BALANCE_TABLES + click_path.read_text(encoding="utf-8")
+            LUA_BALANCE_HELPER + click_path.read_text(encoding="utf-8")
         )
         
         batch_path = Path(__file__).parent / "scripts" / "click_batch.lua"
         self._click_batch_script = redis.register_script(
-            LUA_BALANCE_TABLES + batch_path.read_text(encoding="utf-8")
+            LUA_BALANCE_HELPER + batch_path.read_text(encoding="utf-8")
         )
         
         levelup_path = Path(__file__).parent / "scripts" / "levelup.lua"
         self._levelup_script = redis.register_script(
-            LUA_BALANCE_TABLES + levelup_path.read_text(encoding="utf-8")
+            LUA_BALANCE_HELPER + levelup_path.read_text(encoding="utf-8")
         )
 
         refill_path = (Path(__file__).parent / "scripts" / "refill_buckets.lua")
@@ -90,7 +95,10 @@ class RedisRepository:
         # Invalid legacy data is reported without modifying the player.
         try:
             level = int(data["level"])
-            balance = balance_for_level(level)
+            balance = safe_balance_for_level(level)
+        except NumericLimitExceeded:
+            logger.error("NUMERIC_LIMIT_EXCEEDED player_id=%s", player_id)
+            raise
         except (KeyError, ValueError) as exc:
             logger.error("INVALID_PLAYER_LEVEL player_id=%s level=%r", player_id, data.get("level"))
             raise InvalidPlayerLevel(f"Invalid level for {player_id}") from exc
@@ -250,12 +258,31 @@ class RedisRepository:
     async def click(self, player_id: str) -> dict:
         return await self.click_batch(player_id, count=1)
 
+    async def _run_game_script(self, script, keys, args, *, levelup=False):
+        payload = "{}"
+        while True:
+            result = await script(keys=keys, args=[*args, payload])
+            if result[:2] != [0, "BALANCE_REQUIRED"]:
+                return result
+            # Lua reports the actual level without writing. It rechecks this
+            # level on retry, so another connection's upgrade cannot go stale.
+            level = int(result[2])
+            try:
+                balance = {"level": level, **safe_balance_for_level(level)}
+                if levelup:
+                    safe_balance_for_level(level + 1)
+            except NumericLimitExceeded:
+                logger.error("NUMERIC_LIMIT_EXCEEDED player_id=%s level=%s", args[0], level)
+                return [0, "NUMERIC_LIMIT_EXCEEDED"]
+            payload = json.dumps(balance)
+
         
     async def click_batch(self, player_id: str, count: int) -> dict:
         if type(count) is not int or not 1 <= count <= 10:
             raise ValueError("count는 1~10의 정수여야 합니다.")
 
-        result = await self._click_batch_script(
+        result = await self._run_game_script(
+            self._click_batch_script,
             keys=[
                 f"player:{player_id}",
                 self.LEADERBOARD_KEY,
@@ -285,7 +312,7 @@ class RedisRepository:
             "total_clicks": int(result[3]),
             "gold_gained": int(result[4]),
             "accepted_clicks": int(result[5]),
-            **balance_for_level(int(result[2])),
+            **safe_balance_for_level(int(result[2])),
         }
 
 
@@ -310,12 +337,14 @@ class RedisRepository:
 
         
     async def levelup(self, player_id: str) -> dict:
-        result = await self._levelup_script(
+        result = await self._run_game_script(
+            self._levelup_script,
             keys=[
                 f"player:{player_id}",
                 self.LEADERBOARD_KEY,
             ],
             args=[player_id],
+            levelup=True,
         )
 
         if result[0] == 0:
@@ -334,7 +363,7 @@ class RedisRepository:
                 error.update({
                     "score": int(result[2]),
                     "level": int(result[3]),
-                    **balance_for_level(int(result[3])),
+                    **safe_balance_for_level(int(result[3])),
                 })
 
             return error
@@ -345,5 +374,5 @@ class RedisRepository:
             "score": int(result[1]),
             "level": int(result[2]),
             "gold_spent": int(result[3]),
-            **balance_for_level(int(result[2])),
+            **safe_balance_for_level(int(result[2])),
         }

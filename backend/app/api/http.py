@@ -6,7 +6,7 @@ from redis.exceptions import RedisError
 from pydantic import BaseModel, Field, field_validator
 
 from app.repositories.repository import RedisRepository
-from app.balance import InvalidPlayerLevel
+from app.balance import InvalidPlayerLevel, NumericLimitExceeded
 
 
 class CreatePlayerRequest(BaseModel):
@@ -43,8 +43,9 @@ async def get_player(player_id: str, request: Request):
 
     try:
         player = await repository.get_player(player_id)
-    except InvalidPlayerLevel as exc:
-        raise HTTPException(status_code=409, detail={"code": "INVALID_PLAYER_LEVEL"}) from exc
+    except (InvalidPlayerLevel, NumericLimitExceeded) as exc:
+        code = "INVALID_PLAYER_LEVEL" if isinstance(exc, InvalidPlayerLevel) else "NUMERIC_LIMIT_EXCEEDED"
+        raise HTTPException(status_code=409, detail={"code": code}) from exc
     except RedisError as exc:
         raise HTTPException(
             status_code=503,
@@ -125,8 +126,9 @@ async def create_player(
                 detail="생성된 플레이어를 조회할 수 없습니다.",
             )
 
-    except InvalidPlayerLevel as exc:
-        raise HTTPException(status_code=409, detail={"code": "INVALID_PLAYER_LEVEL"}) from exc
+    except (InvalidPlayerLevel, NumericLimitExceeded) as exc:
+        code = "INVALID_PLAYER_LEVEL" if isinstance(exc, InvalidPlayerLevel) else "NUMERIC_LIMIT_EXCEEDED"
+        raise HTTPException(status_code=409, detail={"code": code}) from exc
     except RedisError as exc:
         raise HTTPException(
             status_code=503,

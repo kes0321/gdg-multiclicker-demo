@@ -7,7 +7,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 
 from app.repositories.repository import RedisRepository
-from app.balance import InvalidPlayerLevel
+from app.balance import InvalidPlayerLevel, NumericLimitExceeded
 from app.services.connection_manager import manager
 
 router = APIRouter()
@@ -207,8 +207,9 @@ async def game_websocket(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
 
-    except InvalidPlayerLevel:
-        await websocket.close(code=1008, reason="INVALID_PLAYER_LEVEL")
+    except (InvalidPlayerLevel, NumericLimitExceeded) as exc:
+        reason = "INVALID_PLAYER_LEVEL" if isinstance(exc, InvalidPlayerLevel) else "NUMERIC_LIMIT_EXCEEDED"
+        await websocket.close(code=1008, reason=reason)
 
     except RedisError:
         logger.exception("WebSocket Redis 처리 실패")

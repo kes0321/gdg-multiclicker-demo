@@ -3,6 +3,7 @@
 -- KEYS[3]: rate_limit:click:<player_id>
 -- ARGV[1]: player_id
 -- ARGV[2]: 배치 클릭 횟수
+-- ARGV[3]: Decimal로 생성한 현재 레벨의 보상·비용 JSON
 
 local count = tonumber(ARGV[2])
 
@@ -31,6 +32,17 @@ if not score or not level or not clicks
     or level ~= math.floor(level)
     or clicks ~= math.floor(clicks) then
     return redis.error_reply("INVALID_PLAYER_DATA")
+end
+
+local balance = read_balance(level, ARGV[3])
+if not balance then
+    return {0, "BALANCE_REQUIRED", level}
+end
+
+local gold_gained = balance.gold_per_click * count
+if score > MAX_SAFE_INTEGER - gold_gained
+    or clicks > MAX_SAFE_INTEGER - count then
+    return {0, "NUMERIC_LIMIT_EXCEEDED"}
 end
 
 local leaderboard_type = redis.call("TYPE", KEYS[2]).ok
@@ -80,10 +92,8 @@ redis.call("EXPIRE", KEYS[3], bucket_ttl)
 
 -- 아래에는 기존 골드·클릭 수·랭킹 갱신 코드 유지
 
-local gold_gained = GOLD_PER_CLICK[level] * count
-
 local new_score = redis.call(
-    "HINCRBY", KEYS[1], "score", gold_gained
+    "HINCRBY", KEYS[1], "score", string.format("%.0f", gold_gained)
 )
 
 local total_clicks = redis.call(
