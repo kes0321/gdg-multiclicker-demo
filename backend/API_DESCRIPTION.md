@@ -2,8 +2,6 @@
 
 갱신일: 2026-11-01
 
-기준 커밋: `753a5d2d95cb26227c2ed50f7798f75605639b06` (`fix: import issue`)
-
 현재 소스 코드의 동작을 기준으로 작성했다. 예시의 호스트, 포트, 플레이어 ID와 시각은 설명용이며 실제 배포 주소는 별도로 설정해야 한다.
 
 ## 1. 연결 정보와 공통 규칙
@@ -46,9 +44,11 @@
 | `player_id` | string | 서버가 생성하는 ID. 현재 형식은 `p` + UUID의 32자리 16진수 |
 | `nickname` | string | 양끝 공백을 제거한 닉네임, 1~20자 |
 | `score` | integer | 현재 보유 골드. 누적 획득량이 아니며 레벨업 시 감소 |
-| `level` | integer | 현재 레벨, 최초 1 |
+| `level` | integer | 현재 레벨, 최초 1, 최대 30 |
 | `total_clicks` | integer | 누적 처리된 클릭 수, 최초 0 |
 | `created_at_ms` | integer | 생성 시각, Unix epoch 밀리초 |
+| `gold_per_click` | integer | 현재 레벨의 클릭당 골드 `G(L)` |
+| `next_upgrade_cost` | integer 또는 null | 현재 레벨의 다음 업그레이드 비용 `C(L)`. 30레벨이면 `null` |
 
 ```json
 {
@@ -57,19 +57,36 @@
   "score": 0,
   "level": 1,
   "total_clicks": 0,
-  "created_at_ms": 1793062800000
+  "created_at_ms": 1793062800000,
+  "gold_per_click": 10,
+  "next_upgrade_cost": 100
 }
 ```
 
 ### 골드와 레벨 계산
 
-- 승인된 단일 클릭: `획득 골드 = 처리 시점의 level`, `total_clicks += 1`.
-- 승인된 배치 클릭: `획득 골드 = 처리 시점의 level × count`, `total_clicks += count`.
+- 클릭당 골드: `G(L) = floor(10 × 1.25^(L - 1))`.
+- 다음 레벨로 올라가는 비용: `C(L) = ceil(100 × 1.6^(L - 1))`, 단 최대 레벨 30에서는 `null`.
+- 승인된 단일 클릭: `획득 골드 = G(처리 시점의 level)`, `total_clicks += 1`.
+- 승인된 배치 클릭: `획득 골드 = G(처리 시점의 level) × accepted_clicks`, `total_clicks += accepted_clicks`.
 - 클릭 1회당 토큰 1개를 소비한다. 단일 클릭과 배치 클릭은 플레이어별 버킷을 공유하며, 토큰이 부족하면 요청 전체를 거절한다. 상세 충전 규칙과 실패 응답은 4.4절을 참고한다.
-- 레벨업 비용: `현재 level × 100`. 잔액이 충분하면 비용을 차감하고 레벨을 1 올린다. `total_clicks`는 변하지 않는다.
-- 예: 레벨 1에서 100골드를 쓰면 레벨 2가 되고, 다음 비용은 200골드이다.
+- 레벨업은 잔액이 충분하면 `C(L)`을 차감하고 레벨을 1 올린다. `total_clicks`는 변하지 않는다. 30레벨에서는 클릭 보상을 유지하고 레벨업을 `MAX_LEVEL_REACHED`로 거절한다.
+- 예: 레벨 1에서는 클릭당 10골드이며 100골드를 쓰면 레벨 2가 된다. 레벨 2에서는 클릭당 12골드, 다음 비용은 160골드이다.
 - 랭킹은 현재 보유 골드 내림차순이다. 레벨업으로 골드를 사용하면 순위가 내려갈 수 있다.
 - 클릭과 레벨업은 각각 Redis Lua 스크립트에서 상태와 랭킹을 함께 갱신한다.
+- `app/balance.py`에서 문자열 계수와 `Decimal`로 생성한 정수 테이블을 응답과 Lua가 공유한다. Lua는 Redis에서 읽은 현재 레벨로 계산한다. 파생 필드는 Redis에 중복 저장하지 않는다.
+- 기존 골드·레벨은 초기화하지 않는다. 저장된 레벨이 1~30 범위를 벗어나거나 유효한 정수가 아니면 자동 보정하지 않고 `INVALID_PLAYER_LEVEL` 오류와 서버 로그로 알린다. 해당 플레이어의 상태 변경은 거절한다.
+
+| 현재 레벨 | 클릭당 골드 | 다음 업그레이드 비용 |
+| --- | ---: | ---: |
+| 1 | 10 | 100 |
+| 2 | 12 | 160 |
+| 5 | 24 | 656 |
+| 10 | 74 | 6,872 |
+| 15 | 227 | 72,058 |
+| 30 | 6,462 | null |
+
+Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치·레벨업 성공 결과는 모두 현재 응답 레벨 기준의 `gold_per_click`, `next_upgrade_cost`를 포함한다. 랭킹 항목은 기존 필드를 유지한다.
 
 ## 3. HTTP API
 
@@ -110,7 +127,9 @@
     "score": 0,
     "level": 1,
     "total_clicks": 0,
-    "created_at_ms": 1793062800000
+    "created_at_ms": 1793062800000,
+    "gold_per_click": 10,
+    "next_upgrade_cost": 100
   }
 }
 ```
@@ -122,6 +141,7 @@
 | 상태 코드 | `detail` 또는 의미 |
 | --- | --- |
 | `422` | 닉네임 누락, 타입·길이 오류, 잘못된 JSON 등 요청 검증 실패 |
+| `409` | `{"code":"INVALID_PLAYER_LEVEL"}`. 기존 세션의 플레이어 레벨 오류이며 새 플레이어로 대체하지 않음 |
 | `500` | `생성된 플레이어를 조회할 수 없습니다.` |
 | `503` | `Redis 처리 실패` |
 
@@ -133,6 +153,7 @@
 - 성공: `200 OK`, 본문은 **Player 객체 자체**이다. `{ "player": ... }`로 감싸지 않는다.
 - 세션 없이 다른 플레이어도 조회할 수 있다.
 - 오류: `404` / `플레이어가 없습니다.`, `503` / `플레이어 조회 실패`.
+- 저장된 레벨 오류: `409`, `{"detail":{"code":"INVALID_PLAYER_LEVEL"}}`.
 
 ### 3.3. 리더보드 조회
 
@@ -177,7 +198,7 @@
 
 ### HTTP 오류 형식
 
-명시적으로 처리한 HTTP 오류는 다음 형식이다.
+일반적인 HTTP 오류는 다음 형식이다. 저장된 레벨 오류의 `detail`은 위의 코드 객체 형식을 사용한다.
 
 ```json
 {"detail": "플레이어가 없습니다."}
@@ -210,7 +231,9 @@
     "score": 0,
     "level": 1,
     "total_clicks": 0,
-    "created_at_ms": 1793062800000
+    "created_at_ms": 1793062800000,
+    "gold_per_click": 10,
+    "next_upgrade_cost": 100
   }
 }
 ```
@@ -234,11 +257,13 @@
   "type": "click_result",
   "success": true,
   "player_id": "p0123456789abcdef0123456789abcdef",
-  "score": 1,
+  "score": 10,
   "level": 1,
   "total_clicks": 1,
-  "gold_gained": 1,
-  "accepted_clicks": 1
+  "gold_gained": 10,
+  "accepted_clicks": 1,
+  "gold_per_click": 10,
+  "next_upgrade_cost": 100
 }
 ```
 
@@ -261,11 +286,13 @@
   "type": "click_batch_result",
   "success": true,
   "player_id": "p0123456789abcdef0123456789abcdef",
-  "score": 3,
+  "score": 30,
   "level": 1,
   "total_clicks": 3,
-  "gold_gained": 3,
-  "accepted_clicks": 3
+  "gold_gained": 30,
+  "accepted_clicks": 3,
+  "gold_per_click": 10,
+  "next_upgrade_cost": 100
 }
 ```
 
@@ -341,11 +368,13 @@
   "player_id": "p0123456789abcdef0123456789abcdef",
   "score": 50,
   "level": 2,
-  "gold_spent": 100
+  "gold_spent": 100,
+  "gold_per_click": 12,
+  "next_upgrade_cost": 160
 }
 ```
 
-`gold_spent`는 이번에 사용한 골드다. 성공 응답에는 `total_clicks`와 다음 업그레이드 비용이 없으므로 기존 클릭 수를 유지하고 다음 비용은 `level × 100`으로 계산한다.
+`gold_spent`는 이번에 사용한 골드다. `gold_per_click`과 `next_upgrade_cost`는 상승한 레벨을 기준으로 반환한다. 성공 응답에는 `total_clicks`가 없으므로 기존 클릭 수를 유지한다. 프론트엔드는 비용이나 클릭 보상을 자체 계산하지 않는다.
 
 골드 부족 응답, 레벨 1·50골드인 예:
 
@@ -360,6 +389,22 @@
 ```
 
 `required_gold`는 부족분이 아닌 업그레이드에 필요한 전체 비용이다. 실패 시 골드와 레벨을 변경하지 않으며 연결을 유지한다.
+
+최대 레벨 거절 응답:
+
+```json
+{
+  "type": "levelup_result",
+  "success": false,
+  "code": "MAX_LEVEL_REACHED",
+  "score": 50,
+  "level": 30,
+  "gold_per_click": 6462,
+  "next_upgrade_cost": null
+}
+```
+
+최대 레벨 거절은 상태를 변경하지 않으며 연결을 유지한다. 이후에도 클릭은 가능하다.
 
 ### 4.6. 접속자 리더보드 방송
 
@@ -392,6 +437,7 @@
 | JSON 구문 오류 | `{"type":"error","code":"INVALID_JSON"}` | 유지 |
 | JSON 배열·숫자·문자열·불리언·null 등 객체가 아닌 값 | `{"type":"error","code":"INVALID_MESSAGE"}` | 유지 |
 | `type` 누락 또는 지원하지 않는 값 | `{"type":"error","code":"UNKNOWN_MESSAGE_TYPE"}` | 유지 |
+| 연결 후 저장된 레벨이 유효하지 않은 클릭·배치 클릭·레벨업 | 해당 `*_result`에 `success: false`, `code: "INVALID_PLAYER_LEVEL"`, 상태 변경 없음 | 유지 |
 
 `click`과 `levelup`은 `type`만으로 처리하며, 메시지에 임의의 점수나 레벨을 넣어도 게임 상태를 지정할 수 없다. 별도의 애플리케이션 `ping`/`pong` 메시지는 구현되어 있지 않다.
 
@@ -400,6 +446,7 @@
 | 상황 | 코드에서 지정하는 종료 코드 | reason |
 | --- | --- | --- |
 | 연결 시 쿠키 없음, 세션 무효·만료, 플레이어 없음 | `1008` | 지정하지 않음 |
+| 연결 시 저장된 플레이어 레벨 오류 | `1008` | `INVALID_PLAYER_LEVEL` |
 | 연결 후 클릭·배치 클릭·레벨업 대상 플레이어 없음 | `1008` | `Player not found` |
 | 인증·게임 처리 중 Redis 오류 | `1011` | 지정하지 않음 |
 | 처리 중 `TimeoutError`·`OSError` 또는 방송 전송 실패로 연결 제거 | `1001` | 지정하지 않음 |
@@ -418,8 +465,8 @@
 | 플레이어 `name` | `nickname` |
 | `gold` | `score` |
 | `level` | `level` |
-| `goldPerClick` | 현재 `level` |
-| `upgradeCost` | 현재 `level × 100` |
+| `goldPerClick` | 서버의 `gold_per_click` |
+| `upgradeCost` | 서버의 `next_upgrade_cost`. `null`이면 최대 레벨 표시 및 업그레이드 비활성화 |
 | 최초 `getState()` | `POST /api/players` 생성·복원 후 WebSocket `connected`로 내 상태 초기화 |
 | `click(count)` | WebSocket `click_batch`, `count`는 1~10의 정수 |
 | `upgrade()` | WebSocket `levelup` |
@@ -430,7 +477,7 @@
 | `avatar` | API 제공 없음. 프론트엔드 기본 이미지 사용 가능 |
 | `ping` | 전용 API 필드는 없음. 어댑터에서 동작 요청부터 결과 수신까지의 경과 시간을 측정하며, 측정 전에는 `null` |
 
-신규 플레이어는 0골드·레벨 1로 시작한다. 다음 업그레이드 비용은 `level × 100`이며, 클릭 성공 응답의 `accepted_clicks`와 최종 상태를 기준으로 예측 상태를 보정한다. `leaderboard` 방송은 요청 결과와 별도로 처리해야 하며, 접속자 목록의 도착을 `connected`와 같은 시점으로 가정하지 않는다.
+신규 플레이어는 0골드·레벨 1로 시작한다. 보상과 비용은 서버 응답 값을 사용하며, 클릭 성공 응답의 `accepted_clicks`와 최종 상태를 기준으로 예측 상태를 보정한다. `leaderboard` 방송은 요청 결과와 별도로 처리해야 하며, 접속자 목록의 도착을 `connected`와 같은 시점으로 가정하지 않는다.
 
 ### 브라우저 연결 예시
 
@@ -480,7 +527,8 @@ async function startGame(nickname: string) {
 - `app/services/connection_manager.py`: 프로세스 내 연결 관리, 접속자 중복 제거, 방송 및 전송 실패 처리.
 - `app/services/token_refill.py`: 0.5초 간격 충전 작업과 지연 처리.
 - `app/repositories/repository.py`: 응답 데이터 변환, 세션 기간, 전체·접속자 랭킹 조회, 클릭 경로 및 버킷 충전 호출.
+- `app/balance.py`: Decimal 기반 성장 테이블과 공통 응답 필드, Lua 테이블 주입.
 - `app/repositories/scripts/create_player.lua`, `click_batch.lua`, `levelup.lua`, `refill_buckets.lua`: 초기 상태, 클릭 제한, 게임 규칙, 토큰 충전.
 - `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 현재 API 어댑터와 개발 서버 프록시 설정.
 
-이 명세는 코드와 Git 기록을 정적으로 확인해 작성했으며, 실행 서버나 Redis를 통한 동작 검증은 수행하지 않았다.
+성장 규칙은 `backend`에서 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`로 검증할 수 있다. 테스트는 기본적으로 로컬 Redis DB 15의 고유 테스트 키만 사용하고 정리하며, `REDIS_TEST_URL`로 테스트 접속 주소를 지정할 수 있다. 실제 Redis/Lua 및 HTTP·WebSocket ASGI 경로를 통해 기준값, 거절 시 상태 유지, 동시 처리와 응답 일치를 검증했다.

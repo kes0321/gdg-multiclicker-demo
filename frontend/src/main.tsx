@@ -123,7 +123,7 @@ function Game({ playerName }: { playerName: string }) {
   }
 
   async function upgrade() {
-    if (!game || busy || game.gold < game.upgradeCost) return;
+    if (!game || busy || game.upgradeCost === null || game.gold < game.upgradeCost) return;
     setBusy(true);
     try { await batcher.current?.afterFlush(() => enqueue(() => service.current!.upgrade())); }
     finally { setBusy(false); }
@@ -173,9 +173,9 @@ function Game({ playerName }: { playerName: string }) {
       </button>
     </section>
 
-    <button className="upgrade-button" disabled={!!error || busy || game.gold < game.upgradeCost} onClick={upgrade} aria-label="업그레이드" aria-busy={busy}>
-      <span className="upgrade-top"><span>Lv. {game.level}</span><strong>{number(game.upgradeCost)} G</strong></span>
-      <span className="upgrade-change"><span>{game.goldPerClick}</span><span className="upgrade-arrow">→</span><span>{game.goldPerClick+1}<small> G / 클릭</small></span></span>
+    <button className="upgrade-button" disabled={!!error || busy || game.upgradeCost === null || game.gold < game.upgradeCost} onClick={upgrade} aria-label="업그레이드" aria-busy={busy}>
+      <span className="upgrade-top"><span>Lv. {game.level}</span><strong>{game.upgradeCost === null ? 'MAX' : `${number(game.upgradeCost)} G`}</strong></span>
+      <span className="upgrade-change">{game.upgradeCost === null ? '최대 레벨 도달' : '레벨업'}</span>
     </button>
     {particles.map(particle => <span className="click-particle" key={particle.id} aria-hidden="true" style={{ left: particle.x, top: particle.y }}>+{number(particle.value)}<small> G</small></span>)}
     {rankingOpen && <GlobalLeaderboard playerId={game.playerId} onClose={() => setRankingOpen(false)}/>}

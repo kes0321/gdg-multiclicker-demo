@@ -1,3 +1,4 @@
+import logging
 from typing import TypedDict
 
 from redis.asyncio import Redis
@@ -7,6 +8,10 @@ from secrets import token_urlsafe
 from time import time_ns
 from uuid import uuid4
 
+from app.balance import InvalidPlayerLevel, LUA_BALANCE_TABLES, balance_for_level
+
+logger = logging.getLogger(__name__)
+
 
 class Player(TypedDict):
     player_id: str
@@ -15,6 +20,8 @@ class Player(TypedDict):
     level: int
     total_clicks: int
     created_at_ms: int
+    gold_per_click: int
+    next_upgrade_cost: int | None
 
 
 class RankingEntry(TypedDict):
@@ -43,17 +50,17 @@ class RedisRepository:
         
         click_path = Path(__file__).parent / "scripts" / "click.lua"
         self._click_script = redis.register_script(
-            click_path.read_text(encoding="utf-8")
+            LUA_BALANCE_TABLES + click_path.read_text(encoding="utf-8")
         )
         
         batch_path = Path(__file__).parent / "scripts" / "click_batch.lua"
         self._click_batch_script = redis.register_script(
-            batch_path.read_text(encoding="utf-8")
+            LUA_BALANCE_TABLES + batch_path.read_text(encoding="utf-8")
         )
         
         levelup_path = Path(__file__).parent / "scripts" / "levelup.lua"
         self._levelup_script = redis.register_script(
-            levelup_path.read_text(encoding="utf-8")
+            LUA_BALANCE_TABLES + levelup_path.read_text(encoding="utf-8")
         )
 
         refill_path = (Path(__file__).parent / "scripts" / "refill_buckets.lua")
@@ -80,14 +87,23 @@ class RedisRepository:
         if not data:
             return None
 
+        # Invalid legacy data is reported without modifying the player.
+        try:
+            level = int(data["level"])
+            balance = balance_for_level(level)
+        except (KeyError, ValueError) as exc:
+            logger.error("INVALID_PLAYER_LEVEL player_id=%s level=%r", player_id, data.get("level"))
+            raise InvalidPlayerLevel(f"Invalid level for {player_id}") from exc
+
         # Hash의 값은 숫자도 문자열로 반환되므로 int로 변환
         return {
             "player_id": player_id,
             "nickname": data["nickname"],
             "score": int(data["score"]),
-            "level": int(data["level"]),
+            "level": level,
             "total_clicks": int(data["total_clicks"]),
             "created_at_ms": int(data["created_at_ms"]),
+            **balance,
         }
 
     async def get_leaderboard(self, limit: int = 10) -> list[RankingEntry]:
@@ -249,6 +265,8 @@ class RedisRepository:
         )
 
         if result[0] == 0:
+            if result[1] == "INVALID_PLAYER_LEVEL":
+                logger.error("INVALID_PLAYER_LEVEL player_id=%s", player_id)
             response = {
                 "success": False,
                 "code": result[1],
@@ -267,6 +285,7 @@ class RedisRepository:
             "total_clicks": int(result[3]),
             "gold_gained": int(result[4]),
             "accepted_clicks": int(result[5]),
+            **balance_for_level(int(result[2])),
         }
 
 
@@ -300,6 +319,8 @@ class RedisRepository:
         )
 
         if result[0] == 0:
+            if result[1] == "INVALID_PLAYER_LEVEL":
+                logger.error("INVALID_PLAYER_LEVEL player_id=%s", player_id)
             error = {
                 "success": False,
                 "code": result[1],
@@ -309,6 +330,13 @@ class RedisRepository:
                 error["score"] = int(result[2])
                 error["required_gold"] = int(result[3])
 
+            if result[1] == "MAX_LEVEL_REACHED":
+                error.update({
+                    "score": int(result[2]),
+                    "level": int(result[3]),
+                    **balance_for_level(int(result[3])),
+                })
+
             return error
 
         return {
@@ -317,4 +345,5 @@ class RedisRepository:
             "score": int(result[1]),
             "level": int(result[2]),
             "gold_spent": int(result[3]),
+            **balance_for_level(int(result[2])),
         }

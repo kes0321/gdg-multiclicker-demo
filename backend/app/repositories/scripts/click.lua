@@ -11,6 +11,11 @@ local score = tonumber(redis.call("HGET", KEYS[1], "score"))
 local level = tonumber(redis.call("HGET", KEYS[1], "level"))
 local clicks = tonumber(redis.call("HGET", KEYS[1], "total_clicks"))
 
+if not level or level ~= math.floor(level)
+    or level < 1 or level > MAX_LEVEL then
+    return {0, "INVALID_PLAYER_LEVEL"}
+end
+
 if not score or not level or not clicks
     or score < 0 or level < 1 or clicks < 0
     or score ~= math.floor(score)
@@ -26,7 +31,7 @@ if leaderboard_type ~= "none" and leaderboard_type ~= "zset" then
 end
 
 -- 클릭당 획득 골드는 서버의 레벨 데이터로 결정
-local gold_gained = level
+local gold_gained = GOLD_PER_CLICK[level]
 
 local new_score = redis.call(
     "HINCRBY", KEYS[1], "score", gold_gained
