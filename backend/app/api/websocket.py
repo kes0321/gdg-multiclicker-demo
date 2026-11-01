@@ -1,15 +1,26 @@
-# backend/app/api/websocket.py
-
-from json import JSONDecodeError
+import asyncio
 import logging
+from contextlib import suppress
+from json import JSONDecodeError
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 
 from app.repositories.repository import RedisRepository
+from app.services.connection_manager import manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+async def broadcast_leaderboard(
+    repository: RedisRepository,
+) -> None:
+    try:
+        await manager.broadcast_leaderboard(repository)
+    except RedisError:
+        # 골드 변경 성공과 랭킹 조회 실패는 별도로 처리
+        logger.exception("리더보드 방송 실패")
 
 
 async def handle_click(
@@ -45,26 +56,27 @@ async def handle_click_batch(
 ) -> bool:
     count = message.get("count")
 
-    # 문자열 "3", 실수 3.0, bool true도 거절
     if type(count) is not int or not 1 <= count <= 10:
-        await websocket.send_json({
+        await manager.send(websocket, {
             "type": "click_batch_result",
             "success": False,
             "code": "INVALID_BATCH_COUNT",
-            "message": "count must be an integer between 1 and 10",
         })
         return True
 
     result = await repository.click_batch(player_id, count)
 
-    if not result["success"] and result["code"] == "PLAYER_NOT_FOUND":
-        await websocket.close(
-            code=1008,
-            reason="Player not found",
-        )
-        return False
+    if not result["success"]:
+        if result["code"] == "PLAYER_NOT_FOUND":
+            await websocket.close(
+                code=1008,
+                reason="Player not found",
+            )
+            return False
+    else:
+        await broadcast_leaderboard(repository)
 
-    await websocket.send_json({
+    await manager.send(websocket, {
         "type": "click_batch_result",
         **result,
     })
@@ -79,14 +91,18 @@ async def handle_levelup(
 ) -> bool:
     result = await repository.levelup(player_id)
 
-    if not result["success"] and result["code"] == "PLAYER_NOT_FOUND":
-        await websocket.close(
-            code=1008,
-            reason="Player not found",
-        )
-        return False
+    if not result["success"]:
+        if result["code"] == "PLAYER_NOT_FOUND":
+            await websocket.close(
+                code=1008,
+                reason="Player not found",
+            )
+            return False
+    else:
+        # 레벨업으로 골드가 차감되므로 방송
+        await broadcast_leaderboard(repository)
 
-    await websocket.send_json({
+    await manager.send(websocket, {
         "type": "levelup_result",
         **result,
     })
@@ -99,9 +115,10 @@ async def game_websocket(websocket: WebSocket):
     repository: RedisRepository = (
         websocket.app.state.repository
     )
+    registered = False
 
     try:
-        # 브라우저가 연결 요청에 함께 보낸 쿠키 확인
+        # 1. 세션 확인
         token = websocket.cookies.get("session_token")
 
         if not token:
@@ -120,39 +137,47 @@ async def game_websocket(websocket: WebSocket):
             await websocket.close(code=1008)
             return
 
-        # 세션이 유효한 경우에만 연결 수락
+        # 2. 연결 수락 및 등록
         await websocket.accept()
 
-        await websocket.send_json({
+        manager.add(websocket, player_id)
+        registered = True
+
+        await manager.send(websocket, {
             "type": "connected",
             "player": player,
         })
 
+        # 접속자가 추가됐으므로 랭킹 방송
+        await broadcast_leaderboard(repository)
+
+        # 3. 요청 수신
         while True:
             try:
                 message = await websocket.receive_json()
             except JSONDecodeError:
-                await websocket.send_json({
+                await manager.send(websocket, {
                     "type": "error",
                     "code": "INVALID_JSON",
                 })
                 continue
 
-            # JSON 배열이나 숫자 등은 거절
             if not isinstance(message, dict):
-                await websocket.send_json({
+                await manager.send(websocket, {
                     "type": "error",
                     "code": "INVALID_MESSAGE",
                 })
                 continue
-            
+
             message_type = message.get("type")
-            
+
             if message_type == "click":
                 connected = await handle_click(
-                    websocket, repository, player_id
+                    websocket,
+                    repository,
+                    player_id,
                 )
-                
+
             elif message_type == "click_batch":
                 connected = await handle_click_batch(
                     websocket,
@@ -163,11 +188,13 @@ async def game_websocket(websocket: WebSocket):
 
             elif message_type == "levelup":
                 connected = await handle_levelup(
-                    websocket, repository, player_id
+                    websocket,
+                    repository,
+                    player_id,
                 )
-                
+
             else:
-                await websocket.send_json({
+                await manager.send(websocket, {
                     "type": "error",
                     "code": "UNKNOWN_MESSAGE_TYPE",
                 })
@@ -177,13 +204,34 @@ async def game_websocket(websocket: WebSocket):
                 return
 
     except WebSocketDisconnect:
-        # 브라우저 종료, 새로고침, 네트워크 단절 등
         pass
 
     except RedisError:
-        logger.exception("WebSocket Redis operation failed")
+        logger.exception("WebSocket Redis 처리 실패")
 
-        await websocket.close(
-            code=1011,
-            reason="Redis operation failed",
-        )
+        with suppress(
+            WebSocketDisconnect,
+            OSError,
+            RuntimeError,
+        ):
+            await websocket.close(code=1011)
+
+    except (TimeoutError, OSError):
+        with suppress(
+            WebSocketDisconnect,
+            OSError,
+            RuntimeError,
+            TimeoutError,
+        ):
+            await asyncio.wait_for(
+                websocket.close(code=1001),
+                timeout=1,
+            )
+
+    finally:
+        # 정상 종료·오류 모두 연결 정리
+        if registered:
+            manager.remove(websocket)
+
+            # 접속자 변경을 나머지 클라이언트에 반영
+            await broadcast_leaderboard(repository)

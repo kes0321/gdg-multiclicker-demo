@@ -55,17 +55,15 @@ function Game({ playerName }: { playerName: string }) {
     service.current = api;
     prediction.current = createClickPrediction();
     queue.current = Promise.resolve();
+    const unsubscribe = api.subscribe(
+      players => { setGame(prediction.current.updateLeaderboard(players)); },
+      handleFailure,
+    );
     void enqueue(() => api.getState());
     const clickBatcher = createClickBatcher(count => { void enqueue(() => api.click(count), count); });
     batcher.current = clickBatcher;
-    let refreshing = false;
-    const timer = setInterval(() => {
-      if (refreshing) return;
-      refreshing = true;
-      void enqueue(() => api.getState()).finally(() => { refreshing = false; });
-    }, 5000);
     return () => {
-      clearInterval(timer);
+      unsubscribe();
       clickBatcher.dispose();
       batcher.current = null;
       service.current = null;
@@ -73,6 +71,13 @@ function Game({ playerName }: { playerName: string }) {
       api.dispose();
     };
   }, [playerName]);
+
+  function handleFailure(reason: unknown) {
+    queueVersion.current++;
+    batcher.current?.clear();
+    setGame(prediction.current.discard());
+    setError(reason instanceof Error ? reason.message : '서버 요청에 실패했습니다.');
+  }
 
   function enqueue(action: () => Promise<GameState>, completedClicks = 0) {
     const version = queueVersion.current;
@@ -84,10 +89,7 @@ function Game({ playerName }: { playerName: string }) {
       setError('');
     }).catch((reason: unknown) => {
       if (version !== queueVersion.current) return;
-      queueVersion.current++;
-      batcher.current?.clear();
-      setGame(prediction.current.discard());
-      setError(reason instanceof Error ? reason.message : '서버 요청에 실패했습니다.');
+      handleFailure(reason);
     });
     return queue.current;
   }

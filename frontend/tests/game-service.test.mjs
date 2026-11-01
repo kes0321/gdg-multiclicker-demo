@@ -15,14 +15,14 @@ test('HTTP session and WebSocket game contract', async t => {
   const sockets = [];
   let dropNext = false;
   let httpFailure = false;
+  let holdReply = false;
+  let heldReply;
   globalThis.window = { location: { href: 'https://game.example/' } };
   globalThis.fetch = async (path, options) => {
     requests.push({ path, options });
     if (httpFailure) return { ok: false, status: 503, json: async () => ({ detail: 'Redis 처리 실패' }) };
     let body;
     if (options.method === 'POST') body = { created: false, player: { ...player } };
-    else if (path.startsWith('/api/players/')) body = { ...player };
-    else if (path === '/api/leaderboard?limit=25') body = { players: [{ rank: 1, ...player }] };
     else throw new Error(`Unexpected request: ${path}`);
     return { ok: true, json: async () => body };
   };
@@ -32,8 +32,12 @@ test('HTTP session and WebSocket game contract', async t => {
     constructor(url) {
       this.url = url;
       sockets.push(this);
-      queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'connected', player: { ...player } }) }));
+      queueMicrotask(() => {
+        this.emit({ type: 'connected', player: { ...player } });
+        this.emit({ type: 'leaderboard', players: [{ rank: 1, ...player }] });
+      });
     }
+    emit(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
     send(data) {
       const message = JSON.parse(data);
       messages.push(message);
@@ -52,12 +56,19 @@ test('HTTP session and WebSocket game contract', async t => {
         player.level++;
         reply = { type: 'levelup_result', success: true, score: player.score, level: player.level };
       } else reply = { type: 'levelup_result', success: false, code: 'INSUFFICIENT_GOLD', score: player.score };
-      queueMicrotask(() => this.onmessage?.({ data: JSON.stringify(reply) }));
+      queueMicrotask(() => {
+        this.emit({ type: 'leaderboard', players: [{ rank: 1, ...player }] });
+        if (holdReply) heldReply = reply;
+        else this.emit(reply);
+      });
     }
     close() { this.readyState = 3; queueMicrotask(() => this.onclose?.()); }
   }
   globalThis.WebSocket = Socket;
   const service = createApiGameService('입력 닉네임');
+  const broadcasts = [];
+  const errors = [];
+  const unsubscribe = service.subscribe(players => broadcasts.push(players), error => errors.push(error));
   t.after(() => { service.dispose(); Object.assign(globalThis, original); });
 
   await t.test('restores cookie session and uses leaderboard nickname, rank and ID', async () => {
@@ -70,7 +81,9 @@ test('HTTP session and WebSocket game contract', async t => {
     assert.equal(sockets[0].url.href, 'wss://game.example/ws');
     assert.deepEqual(JSON.parse(requests[0].options.body), { nickname: '입력 닉네임' });
     assert.ok(requests.every(request => request.options.credentials === 'include'));
-    assert.equal(requests.filter(request => request.path.startsWith('/api/players/')).length, 1);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, '/api/players');
+    assert.equal(broadcasts.length, 1);
   });
   await t.test('applies click and partial levelup responses with server upgrade cost', async () => {
     assert.equal((await service.click(1)).gold, 151);
@@ -97,8 +110,9 @@ test('HTTP session and WebSocket game contract', async t => {
   });
   await t.test('surfaces HTTP error details', async () => {
     httpFailure = true;
-    await assert.rejects(service.getState(), /Redis 처리 실패/);
-    httpFailure = false;
+    const failingService = createApiGameService('테스트');
+    try { await assert.rejects(failingService.getState(), /Redis 처리 실패/); }
+    finally { failingService.dispose(); httpFailure = false; }
   });
   await t.test('sends ten clicks in one request and rejects invalid batch counts locally', async () => {
     const before = messages.length;
@@ -109,6 +123,35 @@ test('HTTP session and WebSocket game contract', async t => {
       await assert.rejects(service.click(count), /1~10/);
     }
     assert.equal(messages.length, before + 1);
+  });
+  await t.test('broadcasts update immediately without resolving an in-flight batch or fetching HTTP', async () => {
+    const before = requests.length;
+    holdReply = true;
+    let resolved = false;
+    const operation = service.click(2).then(state => { resolved = true; return state; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(resolved, false);
+    assert.equal(broadcasts.at(-1)[0].gold, 79);
+    sockets.at(-1).emit(heldReply);
+    assert.equal((await operation).gold, 79);
+    holdReply = false;
+    sockets.at(-1).emit({ type: 'leaderboard', players: [] });
+    assert.deepEqual(broadcasts.at(-1), []);
+    assert.deepEqual((await service.getState()).leaderboard, []);
+    assert.equal(requests.length, before);
+    assert.ok(requests.every(request => request.options.method === 'POST' && request.path === '/api/players'));
+  });
+  await t.test('reports idle disconnects and stops delivering broadcasts after unsubscribe', async () => {
+    const before = broadcasts.length;
+    unsubscribe();
+    sockets.at(-1).emit({ type: 'leaderboard', players: [{ rank: 1, ...player }] });
+    assert.equal(broadcasts.length, before);
+    const stop = service.subscribe(() => {}, error => errors.push(error));
+    const errorCount = errors.length;
+    sockets.at(-1).close();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(errors.length, errorCount + 1);
+    stop();
   });
   await t.test('disposes the socket and prevents further requests', async () => {
     service.dispose();
