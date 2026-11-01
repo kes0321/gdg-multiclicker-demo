@@ -3,11 +3,15 @@
 React + TypeScript + Vite, connected to the backend HTTP and WebSocket APIs.
 
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 
 Build verification: `npm run build`.
+
+For the three-container Docker deployment (Nginx + backend + Redis), see the
+[root deployment README](../README.md). Run `docker compose up -d --build` from
+the repository root; the frontend image includes the Vite `dist/` output.
 
 The online leaderboard's **전체 랭킹** button opens an independent HTTP snapshot of the top 25 players across all users (`GET /api/leaderboard?limit=25`), including offline players. Each opening and manual refresh fetches new data. The popup supports Escape, outside click, close, loading, empty, and retry states; closing cancels its request. It does not change the online ranking or local gold predictions.
 API adapter and batching tests: `node --test tests/*.test.mjs`.

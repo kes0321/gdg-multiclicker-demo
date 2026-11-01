@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.repositories.repository import RedisRepository
 from app.balance import InvalidPlayerLevel, NumericLimitExceeded
+from app.config import SESSION_COOKIE_SECURE
 
 
 class CreatePlayerRequest(BaseModel):
@@ -110,7 +111,7 @@ async def create_player(
                             max_age=repository.SESSION_TTL_SECONDS,
                             httponly=True,
                             samesite="lax",
-                            secure=False,  # 로컬 HTTP용. HTTPS 배포 시 True
+                            secure=SESSION_COOKIE_SECURE,
                             path="/",
                         )
 
@@ -142,7 +143,7 @@ async def create_player(
         max_age=repository.SESSION_TTL_SECONDS,
         httponly=True,
         samesite="lax",
-        secure=False,  # 로컬 HTTP용. HTTPS 배포 시 True
+        secure=SESSION_COOKIE_SECURE,
         path="/",
     )
     response.status_code = 201

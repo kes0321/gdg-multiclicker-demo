@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 
 from app.repositories.repository import RedisRepository
 from app.services.token_refill import run_token_refill
+from app.config import REDIS_HOST, REDIS_PORT
 
 from fastapi import FastAPI, Request
 from redis.asyncio import Redis
@@ -13,8 +14,8 @@ from app.api.websocket import router as websocket_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     client = Redis(
-        host="localhost",
-        port=6379,
+        host=REDIS_HOST,
+        port=REDIS_PORT,
         decode_responses=True,  # bytes 대신 문자열로 반환
     )
     refill_task = None

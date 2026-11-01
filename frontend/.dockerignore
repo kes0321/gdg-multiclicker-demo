@@ -1,0 +1,12 @@
+.env
+.env.*
+node_modules/
+dist/
+**/*.tsbuildinfo
+tests/
+*.md
+Dockerfile
+.dockerignore
+.git/
+coverage/
+.cache/

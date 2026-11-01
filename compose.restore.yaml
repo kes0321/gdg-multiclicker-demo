@@ -1,0 +1,5 @@
+# ONLY for the initial import of dump.rdb into a new, empty Compose volume.
+# Load the RDB first, then enable AOF at runtime before using normal compose.yaml.
+services:
+  redis:
+    command: ["redis-server", "--dir", "/data", "--appendonly", "no", "--save", "60", "1"]
