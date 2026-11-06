@@ -5,7 +5,81 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../src/game-service.ts', import.meta.url), 'utf8');
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
-const { createApiGameService } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { createApiGameService, preparePlayer } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+
+test('entry confirmations only submit the chosen session action', async t => {
+  const originalFetch = globalThis.fetch;
+  const fixture = () => ({ player_id: 'previous-player', nickname: '기존 이름', level: 13, score: 3234, total_clicks: 17 });
+  let player, failure;
+  const requests = [], questions = [];
+  globalThis.fetch = async (path, options) => {
+    requests.push({ path, options });
+    if (failure) return { ok: false, status: 409, json: async () => ({ detail: failure }) };
+    if (path === '/api/players') {
+      const body = JSON.parse(options.body);
+      if (!player) player = { player_id: 'new', nickname: body.nickname, level: 1, score: 0, total_clicks: 0 };
+      else if (body.action === 'rename') player.nickname = body.nickname;
+      else if (body.action === 'restart') Object.assign(player, { nickname: body.nickname, level: 1, score: 0, total_clicks: 0 });
+    }
+    return { ok: true, json: async () => ({ player: player ? { ...player } : null }) };
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  async function run(answers, nickname = '입력 이름') {
+    requests.length = questions.length = 0;
+    return preparePlayer(nickname, async message => {
+      questions.push(message);
+      assert.ok(answers.length, 'unexpected confirmation');
+      return answers.shift();
+    });
+  }
+  await t.test('new visitors start without confirmations', async () => {
+    player = null;
+    assert.equal(await run([]), '입력 이름');
+    assert.equal(questions.length, 0);
+    assert.deepEqual(JSON.parse(requests[1].options.body), { nickname: '입력 이름', action: 'resume' });
+  });
+  await t.test('continuing can rename without losing progress', async () => {
+    player = fixture();
+    assert.equal(await run([true, true]), '입력 이름');
+    for (const detail of ['기존 이름', '13lv', '3,234G', '이어하시겠습니까']) assert.ok(questions[0].includes(detail));
+    assert.ok(questions[1].includes('입력 이름'));
+    assert.deepEqual(JSON.parse(requests[1].options.body), { nickname: '입력 이름', action: 'rename', expected_player_id: 'previous-player' });
+    assert.equal(player.level, 13);
+    assert.equal(player.score, 3234);
+  });
+  await t.test('declining rename keeps the existing nickname and progress', async () => {
+    player = fixture();
+    assert.equal(await run([true, false]), '기존 이름');
+    assert.deepEqual(player, fixture());
+    assert.equal(JSON.parse(requests[1].options.body).action, 'resume');
+  });
+  await t.test('same nickname needs no rename confirmation', async () => {
+    player = fixture();
+    assert.equal(await run([true], player.nickname), '기존 이름');
+    assert.equal(questions.length, 1);
+  });
+  await t.test('declining the restart warning makes no mutation request', async () => {
+    player = fixture();
+    assert.equal(await run([false, false]), null);
+    assert.equal(requests.length, 1);
+    assert.ok(questions[1].includes('이전 데이터는 사라집니다'));
+    assert.deepEqual(player, fixture());
+  });
+  await t.test('confirmed restart clears progress with the entered nickname', async () => {
+    player = fixture();
+    assert.equal(await run([false, true]), '입력 이름');
+    assert.equal(JSON.parse(requests[1].options.body).action, 'restart');
+    assert.deepEqual([player.level, player.score, player.total_clicks], [1, 0, 0]);
+  });
+  await t.test('session lookup errors stop before any confirmation or mutation', async () => {
+    failure = '접속 기록 조회 실패';
+    await assert.rejects(run([]), /접속 기록 조회 실패/);
+    assert.equal(requests.length, 1);
+    assert.equal(questions.length, 0);
+    failure = undefined;
+  });
+  assert.ok(requests.every(({ options }) => options.credentials === 'include'));
+});
 
 test('HTTP session and WebSocket game contract', async t => {
   const original = { fetch: globalThis.fetch, window: globalThis.window, WebSocket: globalThis.WebSocket };

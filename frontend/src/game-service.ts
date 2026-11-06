@@ -8,6 +8,33 @@ export interface GameService {
 interface ApiPlayer { player_id: string; nickname: string; score: number; level: number; total_clicks: number; gold_per_click: number; next_gold_per_click: number | null; next_upgrade_cost: number | null }
 interface Ranking { rank: number; player_id: string; nickname: string; score: number }
 
+export async function preparePlayer(
+  nickname: string,
+  confirm: (message: string) => boolean | Promise<boolean>,
+): Promise<string | null> {
+  async function request(path: string, options?: RequestInit) {
+    const response = await fetch(path, { ...options, credentials: 'include', signal: AbortSignal.timeout(10000) });
+    const body = await response.json();
+    if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `요청 실패 (${response.status})`);
+    return body;
+  }
+  const { player } = await request('/api/session') as { player: ApiPlayer | null };
+  let action: 'resume' | 'rename' | 'restart' = 'resume';
+  if (player) {
+    if (await confirm(`이전 접속 기록이 있습니다.\n(닉네임: ${player.nickname}, 레벨: ${player.level}lv, 보유골드: ${player.score.toLocaleString('ko-KR')}G)\n이어하시겠습니까?`)) {
+      if (nickname !== player.nickname && await confirm(`닉네임을 ${nickname}(으)로 변경하시겠습니까?`)) action = 'rename';
+    } else {
+      if (!await confirm('정말 처음부터 시작하시겠습니까?\n이전 데이터는 사라집니다.')) return null;
+      action = 'restart';
+    }
+  }
+  const result = await request('/api/players', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname, action, expected_player_id: player?.player_id }),
+  });
+  return result.player.nickname;
+}
+
 // Global rankings are an HTTP snapshot, independent of the online WebSocket list.
 export async function getGlobalLeaderboard(signal?: AbortSignal): Promise<Player[]> {
   const response = await fetch('/api/leaderboard?limit=25', {

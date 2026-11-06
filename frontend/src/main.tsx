@@ -2,7 +2,7 @@
 import { createRoot } from 'react-dom/client';
 import { Crown, Signal } from 'lucide-react';
 import { theme } from './theme';
-import { createApiGameService, type GameService, type GameState } from './game-service';
+import { createApiGameService, preparePlayer, type GameService, type GameState } from './game-service';
 import { createClickBatcher } from './click-batcher';
 import { createClickPrediction } from './click-prediction';
 import { GlobalLeaderboard } from './global-leaderboard';
@@ -14,22 +14,51 @@ const number = (value: number) => value.toLocaleString('ko-KR');
 function App() {
   const [nickname, setNickname] = useState('');
   const [playerName, setPlayerName] = useState<string>();
+  const [preparing, setPreparing] = useState(false);
+  const [entryError, setEntryError] = useState('');
+  const [question, setQuestion] = useState<{ message: string; resolve: (answer: boolean) => void }>();
+  const confirmation = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (question) confirmation.current?.showModal(); }, [question]);
+
+  function answer(value: boolean) {
+    confirmation.current?.close();
+    setQuestion(undefined);
+    question?.resolve(value);
+  }
+
+  async function start() {
+    const name = nickname.trim();
+    if (!name || preparing) return;
+    setPreparing(true);
+    setEntryError('');
+    try {
+      const chosenName = await preparePlayer(name, message => new Promise<boolean>(resolve => setQuestion({ message, resolve })));
+      if (chosenName) setPlayerName(chosenName);
+    } catch (reason) {
+      setEntryError(reason instanceof Error ? reason.message : '접속 기록을 확인할 수 없습니다.');
+    } finally { setPreparing(false); }
+  }
 
   if (playerName) return <Game playerName={playerName}/>;
 
   return <main className="entry-screen" style={{ '--accent': theme.colors.accent, '--background': theme.colors.background } as React.CSSProperties}>
     <form className="entry-form" onSubmit={event => {
       event.preventDefault();
-      const name = nickname.trim();
-      if (name) setPlayerName(name);
+      void start();
     }}>
       <div className="entry-title">
         <h1 aria-label="GDGoC Clicker"><ClickerMark/></h1>
         <span>김은성</span>
       </div>
-      <input className="nickname-input" aria-label="닉네임" placeholder="닉네임" value={nickname} onChange={event => setNickname(event.target.value)} maxLength={20} autoComplete="nickname" autoFocus required/>
-      <button className="start-button" type="submit" disabled={!nickname.trim()}>게임 시작</button>
+      <input className="nickname-input" aria-label="닉네임" placeholder="닉네임" value={nickname} onChange={event => setNickname(event.target.value)} maxLength={20} autoComplete="nickname" autoFocus required disabled={preparing}/>
+      <button className="start-button" type="submit" disabled={!nickname.trim() || preparing} aria-busy={preparing}>{preparing ? '확인 중…' : '게임 시작'}</button>
+      {entryError && <p role="alert">{entryError}</p>}
     </form>
+    <dialog ref={confirmation} className="entry-confirm" aria-labelledby="entry-confirm-message"
+      onCancel={event => { event.preventDefault(); answer(false); }}>
+      <p id="entry-confirm-message">{question?.message}</p>
+      <div><button type="button" onClick={() => answer(false)}>아니오</button><button type="button" onClick={() => answer(true)} autoFocus>예</button></div>
+    </dialog>
   </main>;
 }
 
