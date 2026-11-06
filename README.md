@@ -5,6 +5,9 @@ React/Vite 빌드 결과물은 Nginx 이미지에 포함된다. Compose는 `fron
 `gdgclicker.duckdns.org` HTTPS 전환은 [HTTPS 배포 절차](docs/HTTPS.md)를 따른다.
 실제 VM 접속·배포·공인 인증서 발급은 사용자가 수행한다.
 
+임의 경로·단일 비밀번호로 접속하는 superadmin 기능은 기본 비활성화되어 있다.
+전체 유저 조회와 골드·레벨 수정 설정은 [관리자 설정·배포 가이드](docs/ADMIN.md)를 따른다.
+
 ```text
 브라우저 → http://localhost:${HTTP_PORT:-80} → frontend:80 (Nginx + React dist)
                                              ├─ /api/... → backend:8000/api/...
@@ -46,6 +49,9 @@ PowerShell의 복사 명령은 `Copy-Item .env.example .env`이다. `.env`가 �
 | `REDIS_HOST` | `localhost` | 백엔드 직접 실행 기본값. Compose는 항상 `redis`로 덮어쓴다. |
 | `REDIS_PORT` | `6379` | 백엔드 직접 실행 기본값. Compose는 항상 `6379`로 덮어쓴다. |
 | `BACKEND_URL` | `http://localhost:8000` | Vite 개발 프록시 전용. 필요 시 `frontend/.env.local`에 설정. |
+| `ADMIN_PATH` | 빈 값 | 단일 superadmin 접속 경로. 비밀번호 해시와 함께 설정해야 활성화. |
+| `ADMIN_PASSWORD_HASH` | 빈 값 | `python -m app.admin.security`로 생성한 scrypt 해시. 백엔드 전용. |
+| `ADMIN_SESSION_TTL_SECONDS` | `1800` | 관리자 세션 유효기간. 허용 범위 60~86400초. |
 
 루트 `.env`는 Compose 치환에 사용한다. 백엔드에 전달되는 값은 `compose.yaml`의
 `environment`가 결정한다. Python을 직접 실행하면 환경변수를 설정하거나 Uvicorn의 `--env-file`로 파일을 읽는다.
