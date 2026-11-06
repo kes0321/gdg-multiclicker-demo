@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 from app.admin.security import AdminSettings, verify_password
 from app.api.websocket import broadcast_leaderboard
 from app.balance import MAX_LEVEL, MAX_SAFE_INTEGER
+from app.services.connection_manager import manager
 
 logger = logging.getLogger("uvicorn.error")
 STATIC = Path(__file__).parent / "static"
@@ -34,6 +35,11 @@ class PlayerEdit(BaseModel):
     level: int = Field(strict=True, ge=1, le=MAX_LEVEL)
     expected_score: int = Field(strict=True, ge=-MAX_SAFE_INTEGER, le=MAX_SAFE_INTEGER)
     expected_level: int = Field(strict=True, ge=-MAX_SAFE_INTEGER, le=MAX_SAFE_INTEGER)
+
+
+class PlayerDelete(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirm_player_id: str = Field(min_length=1, max_length=80)
 
 
 def create_admin_router(settings: AdminSettings) -> APIRouter:
@@ -171,5 +177,21 @@ def create_admin_router(settings: AdminSettings) -> APIRouter:
                     player_id, body.expected_score, body.score, body.expected_level, body.level)
         await broadcast_leaderboard(repository)
         return protect(JSONResponse({"player": player}))
+
+    @router.delete("/users/{player_id}")
+    async def delete(player_id: str, body: PlayerDelete, request: Request, session=Depends(require_admin)):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", player_id) or body.confirm_player_id != player_id:
+            raise HTTPException(status_code=422, detail="삭제할 유저 ID를 확인해 주세요.")
+        repository = request.app.state.repository
+        try:
+            deleted = await repository.admin_delete_player(player_id)
+        except RedisError as exc:
+            raise HTTPException(status_code=503, detail="유저 삭제 실패") from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="플레이어가 없습니다.")
+        logger.info("superadmin deleted player_id=%s", player_id)
+        await manager.disconnect_player(player_id)
+        await broadcast_leaderboard(repository)
+        return protect(JSONResponse({"ok": True, "player_id": player_id}))
 
     return router

@@ -5,6 +5,7 @@ from json import JSONDecodeError
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
+from starlette.websockets import WebSocketState
 
 from app.repositories.repository import RedisRepository
 from app.balance import InvalidPlayerLevel, NumericLimitExceeded
@@ -144,6 +145,12 @@ async def game_websocket(websocket: WebSocket):
         manager.add(websocket, player_id)
         registered = True
 
+        # Deletion may finish between the initial lookup and registration.
+        # Once registered, the admin deletion also closes this connection.
+        if not await repository.redis.exists(f"player:{player_id}"):
+            await websocket.close(code=1008, reason="PLAYER_DELETED")
+            return
+
         await manager.send(websocket, {
             "type": "connected",
             "player": player,
@@ -206,6 +213,11 @@ async def game_websocket(websocket: WebSocket):
 
     except WebSocketDisconnect:
         pass
+
+    except RuntimeError:
+        # The admin may close a socket while this handler is receiving/sending.
+        if websocket.application_state != WebSocketState.DISCONNECTED:
+            raise
 
     except (InvalidPlayerLevel, NumericLimitExceeded) as exc:
         reason = "INVALID_PLAYER_LEVEL" if isinstance(exc, InvalidPlayerLevel) else "NUMERIC_LIMIT_EXCEEDED"

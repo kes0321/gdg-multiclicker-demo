@@ -61,6 +61,9 @@ class RedisRepository:
         self._admin_edit_script = redis.register_script(
             (Path(__file__).parent / "scripts" / "admin_edit_player.lua").read_text(encoding="utf-8")
         )
+        self._admin_delete_script = redis.register_script(
+            (Path(__file__).parent / "scripts" / "admin_delete_player.lua").read_text(encoding="utf-8")
+        )
         
         click_path = Path(__file__).parent / "scripts" / "click.lua"
         self._click_script = redis.register_script(
@@ -230,6 +233,24 @@ class RedisRepository:
             keys=[f"player:{player_id}", self.LEADERBOARD_KEY],
             args=[player_id, score, level, expected_score, expected_level],
         )
+
+    async def admin_delete_player(self, player_id: str) -> bool:
+        # Sessions have no reverse index. Existing players can only renew their
+        # current token; new tokens are issued atomically with a new player ID.
+        sessions = set()
+        cursor = 0
+        while True:
+            cursor, keys = await self.redis.scan(cursor, match="session:*", count=100)
+            if keys:
+                owners = await self.redis.mget(keys)
+                sessions.update(key for key, owner in zip(keys, owners) if owner == player_id)
+            if cursor == 0:
+                break
+        return bool(await self._admin_delete_script(
+            keys=[f"player:{player_id}", self.LEADERBOARD_KEY,
+                  f"rate_limit:click:{player_id}", *sorted(sessions)],
+            args=[player_id],
+        ))
 
     async def get_player_rank(self, player_id: str) -> int | None:
         """개인 순위 조회. 랭킹에 없으면 None 반환."""

@@ -6,7 +6,7 @@ React/Vite 빌드 결과물은 Nginx 이미지에 포함된다. Compose는 `fron
 실제 VM 접속·배포·공인 인증서 발급은 사용자가 수행한다.
 
 임의 경로·단일 비밀번호로 접속하는 superadmin 기능은 기본 비활성화되어 있다.
-전체 유저 조회와 골드·레벨 수정 설정은 [관리자 설정·배포 가이드](docs/ADMIN.md)를 따른다.
+전체 유저 조회, 골드·레벨 수정 및 완전 삭제 설정은 [관리자 설정·배포 가이드](docs/ADMIN.md)를 따른다.
 
 ```text
 브라우저 → http://localhost:${HTTP_PORT:-80} → frontend:80 (Nginx + React dist)

@@ -567,7 +567,7 @@ async function startGame(nickname: string) {
 - 다른 플레이어 및 내 다른 연결에서 성공한 동작의 골드 변경은 접속자 리더보드 방송에 반영된다. 다만 내 전체 Player 상태를 모든 탭에 방송하지는 않는다. 다른 탭의 레벨·누적 클릭 수까지 동기화하려면 플레이어 조회 또는 재연결의 `connected.player`로 확인한다.
 - 배치당 최대 10회 검증과 플레이어별 토큰 버킷 제한을 함께 적용한다. 단일 클릭도 동일한 제한을 사용한다. 성공한 클릭은 `app/repositories/scripts/click_batch.lua`에서 처리하며, `click.lua`는 현재 단일 클릭 API의 실행 경로가 아니다.
 - 요청 중복 방지·요청 ID·클라이언트별 처리 확인 번호는 제공하지 않는다. 결과를 받기 전에 연결이 끊기면 서버 상태를 확인한 뒤 후속 입력을 처리한다.
-- 게임 유저 로그아웃, 플레이어 삭제, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다. 쿠키 기반 내 기록 조회와 닉네임 변경·진행 초기화는 위의 세션 API를 사용한다.
+- 게임 유저 로그아웃, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 플레이어 완전 삭제는 아래 관리자 API에서만 제공한다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다. 쿠키 기반 내 기록 조회와 닉네임 변경·진행 초기화는 위의 세션 API를 사용한다.
 - 자동 문서 기본 경로는 `/docs`, `/redoc`, OpenAPI JSON은 `/openapi.json`이다. WebSocket 메시지 계약은 이 문서를 참고한다. 현재 HTTP 라우트에는 상세 응답 모델이 선언되어 있지 않다.
 
 확인한 구현 파일:
@@ -598,6 +598,7 @@ async function startGame(nickname: string) {
 | POST | `{ADMIN_PATH}/logout` | 관리자 세션 폐기 |
 | GET | `{ADMIN_PATH}/users?cursor=0&count=50` | 접속 여부와 무관한 전체 유저 페이지 조회 |
 | PATCH | `{ADMIN_PATH}/users/{player_id}` | 해당 유저의 보유 골드·레벨 수정 |
+| DELETE | `{ADMIN_PATH}/users/{player_id}` | 해당 유저의 데이터·게임 세션 완전 삭제 |
 
 로그인·세션 확인 응답은 `{"role":"superadmin","csrf_token":"..."}`이며,
 로그인은 별도 `admin_session` 쿠키를 발급한다. 쿠키는 HttpOnly, SameSite=Strict,
@@ -629,6 +630,14 @@ async function startGame(nickname: string) {
 닉네임·누적 클릭·클릭 토큰은 유지하며 성공 응답은 `{"player": {...}}` 형태의 현재 플레이어 상태다.
 조회 이후 클릭 등으로 값이 바뀌면 `409`로 거절하므로 새로고침 후 다시 요청한다.
 리더보드는 방송하며, 해당 유저의 전체 상태는 다음 게임 응답이나 새로고침으로 갱신된다.
+
+완전 삭제 요청은 `{"confirm_player_id":"삭제할 player_id"}`를 본문에 포함해야 하며,
+경로의 ID와 일치해야 한다. 관리자 세션, 동일 Origin, `X-CSRF-Token` 검증을 모두 적용한다.
+유저 상태 해시·클릭 버킷·랭킹 항목·해당 유저의 모든 게임 세션을 Lua에서 원자적으로 삭제한 뒤
+해당 유저의 모든 게임 WebSocket을 `1008 / PLAYER_DELETED`로 종료하고 리더보드를 방송한다.
+성공 응답은 `{"ok":true,"player_id":"..."}`다. 이미 삭제된 대상은 `404`이며 다른 유저는 유지한다.
+기존 세션으로 복구할 수 없으며, 다시 게임에 입장하면 새로운 유저로 시작한다.
+이 삭제는 현재 Redis 게임 데이터에 적용된다. 기존 백업 파일이나 서버 감사 로그는 삭제하지 않는다.
 
 오류 상태는 인증 실패·만료 `401`, Origin·CSRF 실패 `403`, 대상 없음 `404`,
 동시 변경 `409`, 입력 검증 실패 `422`, 로그인 제한 `429`, Redis 장애 `503`이다.

@@ -60,7 +60,22 @@ function render(players) {
       } catch (error) { report(error); }
       finally { save.disabled = false; }
     });
-    row.insertCell().append(save);
+    const remove = document.createElement('button');
+    remove.textContent = '완전 삭제';
+    remove.className = 'danger';
+    remove.addEventListener('click', async () => {
+      if (!window.confirm(`${player.nickname}\nID: ${player.player_id}\n\n유저 데이터와 모든 게임 세션을 완전히 삭제하시겠습니까?\n삭제 후에는 복구할 수 없습니다.`)) return;
+      remove.disabled = save.disabled = true;
+      try {
+        await request('/users/' + encodeURIComponent(player.player_id), {
+          method: 'DELETE', body: JSON.stringify({ confirm_player_id: player.player_id }),
+        });
+        row.remove();
+        byId('status').textContent = '유저 데이터와 게임 세션을 완전히 삭제했습니다.';
+      } catch (error) { report(error); }
+      finally { remove.disabled = false; save.disabled = player.score === null || player.level === null; }
+    });
+    row.insertCell().append(save, remove);
     return row;
   });
   byId('players').replaceChildren(...rows);

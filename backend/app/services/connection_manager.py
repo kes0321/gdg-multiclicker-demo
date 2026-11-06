@@ -30,6 +30,20 @@ class ConnectionManager:
     def remove(self, websocket: WebSocket) -> None:
         self.connections.pop(websocket, None)
 
+    async def disconnect_player(self, player_id: str) -> None:
+        targets = [(ws, connection) for ws, connection in self.connections.items()
+                   if connection.player_id == player_id]
+        for ws, _ in targets:
+            self.remove(ws)
+
+        async def close(ws, connection):
+            with suppress(WebSocketDisconnect, OSError, RuntimeError, TimeoutError):
+                async with asyncio.timeout(2):
+                    async with connection.send_lock:
+                        await ws.close(code=1008, reason="PLAYER_DELETED")
+
+        await asyncio.gather(*(close(ws, connection) for ws, connection in targets))
+
     async def send(
         self,
         websocket: WebSocket,

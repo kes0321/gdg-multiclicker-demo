@@ -12,10 +12,12 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from app.admin import router as admin_router
 from app.admin.router import create_admin_router
 from app.admin.security import AdminSettings, hash_password, verify_password
 from app.balance import MAX_SAFE_INTEGER
 from app.repositories.repository import RedisRepository
+from app.services.connection_manager import ConnectionManager
 
 PASSWORD = "Test-only-password-2026!"
 PASSWORD_HASH = hash_password(PASSWORD)
@@ -103,7 +105,9 @@ class AdminTests(IsolatedAsyncioTestCase):
     async def test_ordinary_users_cannot_read_edit_or_logout(self):
         for cookie in ("", "session_token=ordinary", "admin_session=forged"):
             for method, path, body in (("GET", "/users", None), ("GET", "/session", None),
-                                       ("PATCH", "/users/" + self.player_id, self.edit()), ("POST", "/logout", None)):
+                                       ("PATCH", "/users/" + self.player_id, self.edit()),
+                                       ("DELETE", "/users/" + self.player_id, {"confirm_player_id": self.player_id}),
+                                       ("POST", "/logout", None)):
                 response, _ = await self.request(method, path, body, cookie=cookie)
                 self.assertEqual(response["status"], 401)
         self.assertEqual(await self.redis.hget("player:" + self.player_id, "score"), "100")
@@ -217,3 +221,75 @@ class AdminTests(IsolatedAsyncioTestCase):
         self.assertEqual(await self.redis.hget("player:" + self.player_id, "score"), "115")
         with patch.object(self.redis, "get", new=AsyncMock(side_effect=RedisError("offline"))):
             self.assertEqual((await self.request(path="/users"))[0]["status"], 503)
+
+    async def test_delete_requires_confirmation_csrf_and_origin(self):
+        await self.login()
+        path = "/users/" + self.player_id
+        body = {"confirm_player_id": self.player_id}
+        before = await self.redis.hgetall("player:" + self.player_id)
+        for options in ({"csrf": ""}, {"csrf": "forged"}, {"origin": None}, {"origin": "https://evil.example"}):
+            self.assertEqual((await self.request("DELETE", path, body, **options))[0]["status"], 403)
+        for invalid in (None, {}, {"confirm_player_id": "another-player"}, {**body, "extra": True}):
+            self.assertEqual((await self.request("DELETE", path, invalid))[0]["status"], 422)
+        self.assertEqual(await self.redis.hgetall("player:" + self.player_id), before)
+        self.assertEqual(await self.redis.zscore(self.repository.LEADERBOARD_KEY, self.player_id), 100)
+
+    async def test_delete_removes_all_player_state_sessions_and_only_target_connections(self):
+        await self.login()
+        own_sessions = ["session:" + self.player_id + suffix for suffix in ("-a", "-b")]
+        other_session = "session:" + self.player_id + "-other"
+        bucket = "rate_limit:click:" + self.player_id
+        self.keys.update([*own_sessions, other_session, bucket])
+        for key in own_sessions:
+            await self.redis.set(key, self.player_id, ex=120)
+        await self.redis.set(other_session, "another-player", ex=120)
+        await self.redis.hset(bucket, mapping={"tokens": 7})
+        await self.redis.zadd(self.repository.LEADERBOARD_KEY, {"another-player": 999})
+        manager = ConnectionManager()
+        sockets = [AsyncMock() for _ in range(3)]
+        for socket, player_id in zip(sockets, (self.player_id, self.player_id, "another-player")):
+            manager.add(socket, player_id)
+        with patch.object(admin_router, "manager", manager), patch.object(admin_router, "broadcast_leaderboard", new=AsyncMock()) as broadcast:
+            response, body = await self.request("DELETE", "/users/" + self.player_id, {"confirm_player_id": self.player_id})
+            self.assertEqual((response["status"], body), (200, {"ok": True, "player_id": self.player_id}))
+            broadcast.assert_awaited_once_with(self.repository)
+        self.assertIn((b"cache-control", b"no-store"), response["headers"])
+        self.assertEqual(await self.redis.exists("player:" + self.player_id, bucket, *own_sessions), 0)
+        self.assertIsNone(await self.redis.zscore(self.repository.LEADERBOARD_KEY, self.player_id))
+        self.assertEqual(await self.redis.zscore(self.repository.LEADERBOARD_KEY, "another-player"), 999)
+        self.assertEqual(await self.redis.get(other_session), "another-player")
+        self.assertEqual((await self.request())[0]["status"], 200)
+        self.assertEqual(list(manager.connections), [sockets[2]])
+        for socket in sockets[:2]:
+            socket.close.assert_awaited_once_with(code=1008, reason="PLAYER_DELETED")
+        sockets[2].close.assert_not_awaited()
+        self.assertEqual((await self.request("DELETE", "/users/" + self.player_id, {"confirm_player_id": self.player_id}))[0]["status"], 404)
+
+    async def test_delete_validates_before_writes_and_rechecks_session_ownership(self):
+        await self.login()
+        session = "session:" + self.player_id
+        bucket = "rate_limit:click:" + self.player_id
+        self.keys.update([session, bucket])
+        await self.redis.set(session, self.player_id)
+        await self.redis.hset(bucket, mapping={"tokens": 7})
+        before = await self.redis.hgetall("player:" + self.player_id)
+        await self.redis.set(self.repository.LEADERBOARD_KEY, "wrong-type")
+        response, _ = await self.request("DELETE", "/users/" + self.player_id, {"confirm_player_id": self.player_id})
+        self.assertEqual(response["status"], 503)
+        self.assertEqual(await self.redis.hgetall("player:" + self.player_id), before)
+        self.assertEqual(await self.redis.hget(bucket, "tokens"), "7")
+        self.assertEqual(await self.redis.get(session), self.player_id)
+        await self.redis.delete(self.repository.LEADERBOARD_KEY)
+        await self.redis.zadd(self.repository.LEADERBOARD_KEY, {self.player_id: 100})
+        original_script = self.repository._admin_delete_script
+        async def interleaved(*, keys, args):
+            self.assertIn(session, keys)
+            await self.redis.set(session, "another-player")
+            await self.repository.click(self.player_id)
+            return await original_script(keys=keys, args=args)
+        with patch.object(self.repository, "_admin_delete_script", interleaved):
+            self.assertTrue(await self.repository.admin_delete_player(self.player_id))
+        self.assertEqual(await self.redis.get(session), "another-player")
+        for operation in (self.repository.click, self.repository.levelup):
+            self.assertEqual(await operation(self.player_id), {"success": False, "code": "PLAYER_NOT_FOUND"})
+        self.assertEqual(await self.redis.exists("player:" + self.player_id, bucket), 0)

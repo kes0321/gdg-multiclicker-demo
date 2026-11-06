@@ -450,6 +450,50 @@ class GrowthTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, {"success": False, "code": "NUMERIC_LIMIT_EXCEEDED"})
             self.assertEqual(await self.snapshot(player_id), before)
 
+    async def test_deleted_player_cannot_resume_or_recreate_state_from_open_sockets(self):
+        player_id, token = await self.session_fixture()
+        first, second = await self.connect(token), await self.connect(token)
+        for session in (first, second):
+            await self.next_message(session, "connected")
+        self.assertTrue(await self.repository.admin_delete_player(player_id))
+        await websocket.manager.disconnect_player(player_id)
+        for session in (first, second):
+            while True:
+                event = await asyncio.wait_for(session.outgoing.get(), 3)
+                if event["type"] == "websocket.close":
+                    self.assertEqual((event["code"], event["reason"]), (1008, "PLAYER_DELETED"))
+                    break
+            await session.incoming.put({"type": "websocket.disconnect", "code": 1008})
+            await session.task
+        self.assertEqual(websocket.manager.connections, {})
+        self.assertEqual((await self.request("GET", "/api/session", token=token))[1], {"player": None})
+        self.assertEqual((await self.request("GET", f"/api/players/{player_id}"))[0]["status"], 404)
+        self.assertEqual((await self.request("POST", "/api/players", {
+            "nickname": "fixture", "action": "restart", "expected_player_id": player_id,
+        }, token))[0]["status"], 409)
+        self.assertFalse(await self.repository.update_player_session(token, player_id, "fixture", "restart"))
+        denied = await self.connect(token)
+        self.assertEqual((await asyncio.wait_for(denied.outgoing.get(), 3))["code"], 1008)
+        await denied.task
+        await self.repository._refill_buckets_script(keys=[f"rate_limit:click:{player_id}"], args=[30, 4])
+        self.assertEqual(await self.snapshot(player_id), ({}, {}, None))
+
+    async def test_deletion_during_websocket_handshake_cannot_leave_a_registered_connection(self):
+        player_id, token = await self.session_fixture()
+        original = self.repository.get_player
+        async def delete_after_lookup(current_id):
+            player = await original(current_id)
+            await self.repository.admin_delete_player(current_id)
+            await websocket.manager.disconnect_player(current_id)
+            return player
+        with patch.object(self.repository, "get_player", delete_after_lookup):
+            session = await self.connect(token)
+            self.assertEqual((await asyncio.wait_for(session.outgoing.get(), 3))["type"], "websocket.accept")
+            close = await asyncio.wait_for(session.outgoing.get(), 3)
+            self.assertEqual((close["type"], close["code"], close["reason"]), ("websocket.close", 1008, "PLAYER_DELETED"))
+            await session.task
+        self.assertEqual(websocket.manager.connections, {})
+
     async def test_two_websockets_stop_at_level40_and_keep_clicking(self):
         cost = 5708990771
         player_id = await self.seed(level=39, score=cost * 2 + 100)
