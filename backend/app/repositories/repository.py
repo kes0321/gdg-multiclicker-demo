@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from app.balance import (
     InvalidPlayerLevel, NumericLimitExceeded, LUA_BALANCE_HELPER,
-    safe_balance_for_level,
+    MAX_SAFE_INTEGER, safe_balance_for_level,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,10 @@ class RedisRepository:
         update_path = Path(__file__).parent / "scripts" / "update_player_session.lua"
         self._update_player_session_script = redis.register_script(
             update_path.read_text(encoding="utf-8")
+        )
+
+        self._admin_edit_script = redis.register_script(
+            (Path(__file__).parent / "scripts" / "admin_edit_player.lua").read_text(encoding="utf-8")
         )
         
         click_path = Path(__file__).parent / "scripts" / "click.lua"
@@ -200,6 +204,32 @@ class RedisRepository:
             for rank, player in enumerate(players, start=1)
         ]
         
+
+    async def admin_list_players(self, cursor: int, count: int) -> dict:
+        cursor, keys = await self.redis.scan(cursor, match="player:*", count=count)
+        async with self.redis.pipeline(transaction=False) as pipe:
+            for key in keys:
+                pipe.hgetall(key)
+            records = await pipe.execute()
+        players = []
+        for key, data in zip(keys, records):
+            if not data:
+                continue
+            def integer(field):
+                try:
+                    value = int(data[field])
+                    return value if abs(value) <= MAX_SAFE_INTEGER else None
+                except (KeyError, ValueError):
+                    return None
+            players.append({"player_id": key.removeprefix("player:"), "nickname": data.get("nickname", "Unknown"),
+                            "score": integer("score"), "level": integer("level")})
+        return {"players": players, "next_cursor": str(cursor)}
+
+    async def admin_edit_player(self, player_id, score, level, expected_score, expected_level) -> str:
+        return await self._admin_edit_script(
+            keys=[f"player:{player_id}", self.LEADERBOARD_KEY],
+            args=[player_id, score, level, expected_score, expected_level],
+        )
 
     async def get_player_rank(self, player_id: str) -> int | None:
         """개인 순위 조회. 랭킹에 없으면 None 반환."""

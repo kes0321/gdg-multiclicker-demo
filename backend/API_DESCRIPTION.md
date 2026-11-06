@@ -1,6 +1,6 @@
 # 프론트엔드 연동용 API 명세
 
-갱신일: 2026-11-06
+갱신일: 2026-11-07
 
 현재 소스 코드의 동작을 기준으로 작성했다. 예시의 호스트, 포트, 플레이어 ID와 시각은 설명용이며 실제 배포 주소는 별도로 설정해야 한다.
 
@@ -567,7 +567,7 @@ async function startGame(nickname: string) {
 - 다른 플레이어 및 내 다른 연결에서 성공한 동작의 골드 변경은 접속자 리더보드 방송에 반영된다. 다만 내 전체 Player 상태를 모든 탭에 방송하지는 않는다. 다른 탭의 레벨·누적 클릭 수까지 동기화하려면 플레이어 조회 또는 재연결의 `connected.player`로 확인한다.
 - 배치당 최대 10회 검증과 플레이어별 토큰 버킷 제한을 함께 적용한다. 단일 클릭도 동일한 제한을 사용한다. 성공한 클릭은 `app/repositories/scripts/click_batch.lua`에서 처리하며, `click.lua`는 현재 단일 클릭 API의 실행 경로가 아니다.
 - 요청 중복 방지·요청 ID·클라이언트별 처리 확인 번호는 제공하지 않는다. 결과를 받기 전에 연결이 끊기면 서버 상태를 확인한 뒤 후속 입력을 처리한다.
-- 로그아웃, 플레이어 삭제, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다. 쿠키 기반 내 기록 조회와 닉네임 변경·진행 초기화는 위의 세션 API를 사용한다.
+- 게임 유저 로그아웃, 플레이어 삭제, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다. 쿠키 기반 내 기록 조회와 닉네임 변경·진행 초기화는 위의 세션 API를 사용한다.
 - 자동 문서 기본 경로는 `/docs`, `/redoc`, OpenAPI JSON은 `/openapi.json`이다. WebSocket 메시지 계약은 이 문서를 참고한다. 현재 HTTP 라우트에는 상세 응답 모델이 선언되어 있지 않다.
 
 확인한 구현 파일:
@@ -584,3 +584,51 @@ async function startGame(nickname: string) {
 - `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 현재 API 어댑터와 개발 서버 프록시 설정.
 
 성장 규칙은 `backend`에서 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`로 검증할 수 있다. 테스트는 기본적으로 로컬 Redis DB 15의 고유 테스트 키만 사용하고 정리하며, `REDIS_TEST_URL`로 테스트 접속 주소를 지정할 수 있다. 수식은 1~40레벨에서 독립적인 정확한 분수 계산과 비교하고, 실제 Redis/Lua 및 HTTP·WebSocket ASGI 경로로 39→40, 동시 레벨업 시 40 초과 방지, 만렙 클릭·배치 보상, 거절 시 상태 유지와 응답 일치를 검증한다.
+## 7. 선택적 superadmin API
+
+루트 `.env`의 `ADMIN_PATH`와 `ADMIN_PASSWORD_HASH`가 모두 설정된 경우에만 활성화된다.
+아래 `{ADMIN_PATH}`는 실제 설정한 단일 경로로 대체한다. 설정·비밀번호 생성·배포 절차는
+[관리자 가이드](../docs/ADMIN.md)를 따른다. 관리자 경로는 OpenAPI에 노출하지 않는다.
+
+| 메서드 | 경로 | 내용 |
+|---|---|---|
+| GET | `{ADMIN_PATH}` 또는 `{ADMIN_PATH}/` | 비밀번호 로그인 및 관리자 화면 |
+| POST | `{ADMIN_PATH}/login` | `{"password":"입력한 비밀번호"}`로 로그인 |
+| GET | `{ADMIN_PATH}/session` | 현재 관리자 세션 확인 |
+| POST | `{ADMIN_PATH}/logout` | 관리자 세션 폐기 |
+| GET | `{ADMIN_PATH}/users?cursor=0&count=50` | 접속 여부와 무관한 전체 유저 페이지 조회 |
+| PATCH | `{ADMIN_PATH}/users/{player_id}` | 해당 유저의 보유 골드·레벨 수정 |
+
+로그인·세션 확인 응답은 `{"role":"superadmin","csrf_token":"..."}`이며,
+로그인은 별도 `admin_session` 쿠키를 발급한다. 쿠키는 HttpOnly, SameSite=Strict,
+관리자 경로 한정이며 HTTPS 배포에서는 Secure를 사용한다. 세션은 기본 1800초 뒤 만료된다.
+일반 게임 세션으로는 관리자 데이터에 접근할 수 없다.
+
+로그인을 포함한 변경 요청은 동일 Origin이어야 한다. 인증 이후 변경 요청에는 응답에서 받은
+`X-CSRF-Token` 헤더도 필요하다. 동일 IP 로그인 시도는 5분 동안 5회로 제한하며,
+성공한 로그인은 해당 제한을 초기화한다. 비밀번호·경로 변경 후 재시작하면 기존 세션을 거절한다.
+
+유저 조회 응답:
+
+```json
+{"players":[{"player_id":"...","nickname":"demo","score":100,"level":3}],"next_cursor":"0"}
+```
+
+`count`는 1~100의 SCAN 힌트다. `next_cursor`는 문자열이며 `"0"`이면 순회가 끝났다.
+다른 값이면 다음 요청의 `cursor`에 그대로 넣는다. 실시간 목록은 고정된 스냅샷이 아니다.
+안전한 정수로 읽을 수 없는 골드·레벨은 `null`이며 관리자 화면에서 저장을 막는다.
+
+수정 요청 예:
+
+```json
+{"score":500,"level":5,"expected_score":100,"expected_level":3}
+```
+
+`score`는 0~9007199254740991, `level`은 1~40의 정수다. `expected_*`에는 목록에서 확인한
+변경 전 값을 보낸다. Lua에서 현재 값과 비교한 뒤 골드·레벨·랭킹을 원자적으로 갱신한다.
+닉네임·누적 클릭·클릭 토큰은 유지하며 성공 응답은 `{"player": {...}}` 형태의 현재 플레이어 상태다.
+조회 이후 클릭 등으로 값이 바뀌면 `409`로 거절하므로 새로고침 후 다시 요청한다.
+리더보드는 방송하며, 해당 유저의 전체 상태는 다음 게임 응답이나 새로고침으로 갱신된다.
+
+오류 상태는 인증 실패·만료 `401`, Origin·CSRF 실패 `403`, 대상 없음 `404`,
+동시 변경 `409`, 입력 검증 실패 `422`, 로그인 제한 `429`, Redis 장애 `503`이다.

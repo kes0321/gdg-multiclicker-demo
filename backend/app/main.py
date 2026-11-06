@@ -9,6 +9,9 @@ from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 from app.api.http import router as http_router
 from app.api.websocket import router as websocket_router
+from app.admin.router import create_admin_router
+from app.admin.security import AdminSettings
+from app.config import ADMIN_PATH, ADMIN_PASSWORD_HASH, ADMIN_SESSION_TTL_SECONDS, SESSION_COOKIE_SECURE
 
 
 @asynccontextmanager
@@ -47,6 +50,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.include_router(http_router)
 app.include_router(websocket_router)
+
+admin_settings = AdminSettings(ADMIN_PATH, ADMIN_PASSWORD_HASH, ADMIN_SESSION_TTL_SECONDS, SESSION_COOKIE_SECURE)
+if admin_settings.enabled:
+    app.include_router(create_admin_router(admin_settings))
 
 
 @app.get("/hello")
