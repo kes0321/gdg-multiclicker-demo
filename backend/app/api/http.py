@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from pydantic import BaseModel, Field, field_validator
+from typing import Literal
 
 from app.repositories.repository import RedisRepository
 from app.balance import InvalidPlayerLevel, NumericLimitExceeded
@@ -12,6 +13,8 @@ from app.config import SESSION_COOKIE_SECURE
 
 class CreatePlayerRequest(BaseModel):
     nickname: str = Field(min_length=1, max_length=20)
+    action: Literal["resume", "rename", "restart"] = "resume"
+    expected_player_id: str | None = Field(default=None, min_length=1, max_length=64)
 
     @field_validator("nickname", mode="before")
     @classmethod
@@ -80,6 +83,22 @@ async def get_leaderboard(
     return {"players": players}
 
 
+@router.get("/session")
+async def get_session(request: Request, response: Response):
+    repository = request.app.state.repository
+    token = request.cookies.get("session_token")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        player_id = await repository.get_session_player_id(token) if token else None
+        player = await repository.get_player(player_id) if player_id else None
+    except (InvalidPlayerLevel, NumericLimitExceeded) as exc:
+        code = "INVALID_PLAYER_LEVEL" if isinstance(exc, InvalidPlayerLevel) else "NUMERIC_LIMIT_EXCEEDED"
+        raise HTTPException(status_code=409, detail={"code": code}) from exc
+    except RedisError as exc:
+        raise HTTPException(status_code=503, detail="접속 기록 조회 실패") from exc
+    return {"player": player}
+
+
 @router.post("/players")
 async def create_player(
     body: CreatePlayerRequest,
@@ -89,20 +108,33 @@ async def create_player(
     repository = request.app.state.repository
     token = request.cookies.get("session_token")
 
+    if body.action != "resume" and not body.expected_player_id:
+        raise HTTPException(status_code=409, detail="접속 기록을 다시 확인해 주세요.")
+
     try:
         # 1. 기존 세션이 있으면 해당 플레이어 조회
         if token:
             player_id = await repository.get_session_player_id(token)
+
+            if body.expected_player_id and player_id != body.expected_player_id:
+                raise HTTPException(status_code=409, detail="접속 기록이 변경되었습니다. 다시 확인해 주세요.")
 
             if player_id:
                 player = await repository.get_player(player_id)
 
                 if player is not None:
                     # 정상 재접속 시 세션 유효기간 연장
-                    renewed = await repository.redis.expire(
-                        f"session:{token}",
-                        repository.SESSION_TTL_SECONDS,
-                    )
+                    if body.action == "resume":
+                        renewed = await repository.redis.expire(
+                            f"session:{token}",
+                            repository.SESSION_TTL_SECONDS,
+                        )
+                    else:
+                        renewed = await repository.update_player_session(
+                            token, player_id, body.nickname, body.action,
+                        )
+                        if renewed:
+                            player = await repository.get_player(player_id)
 
                     if renewed:
                         response.set_cookie(
@@ -116,6 +148,9 @@ async def create_player(
                         )
 
                         return {"created": False, "player": player}
+
+        if body.expected_player_id:
+            raise HTTPException(status_code=409, detail="접속 기록이 만료되었습니다. 다시 확인해 주세요.")
 
         # 2. 유효한 세션이 없으면 Lua로 신규 생성
         player_id, token = await repository.create_player(body.nickname)

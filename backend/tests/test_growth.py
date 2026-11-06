@@ -146,6 +146,110 @@ class GrowthTests(unittest.IsolatedAsyncioTestCase):
     async def send(self, session, message):
         await session.incoming.put({"type": "websocket.receive", "text": json.dumps(message)})
 
+    async def session_fixture(self):
+        player_id = await self.seed(level=13, score=3234, tokens=7)
+        await self.redis.hset(f"player:{player_id}", "total_clicks", 17)
+        token = f"{self.prefix}-entry"
+        self.keys.add(f"session:{token}")
+        await self.redis.set(f"session:{token}", player_id, ex=120)
+        return player_id, token
+
+    async def test_session_preview_is_read_only_and_cookie_scoped(self):
+        player_id, token = await self.session_fixture()
+        before = await self.snapshot(player_id)
+        ttl = await self.redis.pttl(f"session:{token}")
+        response, body = await self.request("GET", "/api/session", token=token)
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(body["player"]["player_id"], player_id)
+        self.assertEqual((body["player"]["level"], body["player"]["score"]), (13, 3234))
+        self.assertIn((b"cache-control", b"no-store"), response["headers"])
+        self.assertFalse(any(key == b"set-cookie" for key, _ in response["headers"]))
+        self.assertLessEqual(await self.redis.pttl(f"session:{token}"), ttl)
+        self.assertEqual(await self.snapshot(player_id), before)
+        for missing in (None, "unknown-token"):
+            response, body = await self.request("GET", "/api/session", token=missing)
+            self.assertEqual((response["status"], body), (200, {"player": None}))
+        await self.redis.expire(f"session:{token}", 0)
+        self.assertEqual((await self.request("GET", "/api/session", token=token))[1], {"player": None})
+
+    async def test_resume_and_rename_preserve_progress(self):
+        player_id, token = await self.session_fixture()
+        before = await self.snapshot(player_id)
+        response, body = await self.request("POST", "/api/players", {
+            "nickname": "ignored", "action": "resume", "expected_player_id": player_id,
+        }, token)
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(body["player"]["nickname"], "fixture")
+        self.assertEqual(await self.snapshot(player_id), before)
+        response, body = await self.request("POST", "/api/players", {
+            "nickname": "  새 이름  ", "action": "rename", "expected_player_id": player_id,
+        }, token)
+        self.assertEqual(response["status"], 200)
+        self.assertFalse(body["created"])
+        self.assertEqual(body["player"]["nickname"], "새 이름")
+        after = await self.snapshot(player_id)
+        self.assertEqual(after[0], {**before[0], "nickname": "새 이름"})
+        self.assertEqual(after[1:], before[1:])
+        self.assertGreater(await self.redis.ttl(f"session:{token}"), 120)
+
+    async def test_restart_resets_progress_bucket_and_ranking_with_existing_socket(self):
+        player_id, token = await self.session_fixture()
+        other_id = await self.seed(level=20, score=9999)
+        other_before = await self.snapshot(other_id)
+        socket = await self.connect(token)
+        await self.next_message(socket, "connected")
+        response, body = await self.request("POST", "/api/players", {
+            "nickname": "처음부터", "action": "restart", "expected_player_id": player_id,
+        }, token)
+        self.assertEqual(response["status"], 200)
+        player = body["player"]
+        self.assertEqual((player["player_id"], player["nickname"], player["level"], player["score"], player["total_clicks"]), (player_id, "처음부터", 1, 0, 0))
+        self.assertGreater(player["created_at_ms"], 123)
+        self.assertEqual((player["gold_per_click"], player["next_gold_per_click"], player["next_upgrade_cost"]), (10, 12, 100))
+        self.assertEqual(await self.redis.zscore(self.repository.LEADERBOARD_KEY, player_id), 0)
+        self.assertEqual(await self.redis.hmget(f"rate_limit:click:{player_id}", "tokens", "last_refill_ms"), ["30", str(player["created_at_ms"])])
+        self.assertGreater(await self.redis.ttl(f"rate_limit:click:{player_id}"), 0)
+        self.assertEqual(await self.snapshot(other_id), other_before)
+        await self.send(socket, {"type": "click"})
+        result = await self.next_message(socket, "click_result")
+        self.assertEqual((result["level"], result["gold_gained"], result["score"], result["total_clicks"]), (1, 10, 10, 1))
+
+    async def test_entry_actions_reject_stale_sessions_and_invalid_requests(self):
+        player_id, token = await self.session_fixture()
+        before = await self.snapshot(player_id)
+        for body, cookie, status in (
+            ({"nickname": "new", "action": "restart"}, token, 409),
+            ({"nickname": "new", "action": "rename", "expected_player_id": "other"}, token, 409),
+            ({"nickname": "new", "action": "restart", "expected_player_id": player_id}, None, 409),
+            ({"nickname": "new", "action": "delete"}, token, 422),
+            ({"nickname": " ", "action": "rename", "expected_player_id": player_id}, token, 422),
+            ({"nickname": "x" * 21, "action": "restart", "expected_player_id": player_id}, token, 422),
+        ):
+            response, _ = await self.request("POST", "/api/players", body, cookie)
+            self.assertEqual(response["status"], status)
+            self.assertEqual(await self.snapshot(player_id), before)
+        other_id = await self.seed()
+        other_before = await self.snapshot(other_id)
+        await self.redis.set(f"session:{token}", other_id, ex=120)
+        response, _ = await self.request("POST", "/api/players", {
+            "nickname": "new", "action": "restart", "expected_player_id": player_id,
+        }, token)
+        self.assertEqual(response["status"], 409)
+        self.assertEqual(await self.snapshot(player_id), before)
+        self.assertEqual(await self.snapshot(other_id), other_before)
+        self.assertFalse(await self.repository.update_player_session(token, player_id, "new", "restart"))
+
+    async def test_restart_validates_redis_types_before_any_write(self):
+        player_id, token = await self.session_fixture()
+        before = await self.redis.hgetall(f"player:{player_id}")
+        await self.redis.set(f"rate_limit:click:{player_id}", "wrong-type")
+        response, _ = await self.request("POST", "/api/players", {
+            "nickname": "new", "action": "restart", "expected_player_id": player_id,
+        }, token)
+        self.assertEqual(response["status"], 503)
+        self.assertEqual(await self.redis.hgetall(f"player:{player_id}"), before)
+        self.assertEqual(await self.redis.zscore(self.repository.LEADERBOARD_KEY, player_id), 3234)
+
     async def test_all_levels_share_response_and_lua_values(self):
         for level in range(1, 41):
             with self.subTest(level=level):

@@ -1,6 +1,6 @@
 # 프론트엔드 연동용 API 명세
 
-갱신일: 2026-11-01
+갱신일: 2026-11-06
 
 현재 소스 코드의 동작을 기준으로 작성했다. 예시의 호스트, 포트, 플레이어 ID와 시각은 설명용이며 실제 배포 주소는 별도로 설정해야 한다.
 
@@ -28,7 +28,7 @@
 
 ### 권장 호출 순서
 
-1. 닉네임을 입력받아 `POST /api/players`를 호출한다.
+1. 닉네임 입력 후 `GET /api/session`으로 쿠키에 연결된 기존 기록을 조회한다. 기록이 있으면 닉네임·레벨·보유 골드와 함께 이어하기 여부를 묻는다. 이어하기에서는 닉네임 변경 여부를, 새로 시작에서는 이전 데이터 초기화를 추가 확인한다. 최종 선택에 따라 `POST /api/players`를 호출한다. 초기화 확인을 취소하면 POST 요청 없이 입력 화면에 남는다.
 2. 응답의 `player`로 내 상태를 초기화하고, 쿠키 발급이 완료된 후 `/ws`에 연결한다.
 3. `connected` 메시지의 `player`로 최신 상태를 반영한다.
 4. 클릭은 `click` 또는 `click_batch`, 업그레이드는 `levelup` 메시지로 전송한다.
@@ -99,13 +99,18 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 | 메서드 | 경로 | 용도 | 세션 필요 |
 | --- | --- | --- | --- |
 | `POST` | `/api/players` | 플레이어 생성 또는 세션 복원 | 선택 |
+| `GET` | `/api/session` | 쿠키에 연결된 기존 플레이어 조회 | 선택 |
 | `GET` | `/api/players/{player_id}` | 플레이어 상세 조회 | 아니요 |
 | `GET` | `/api/leaderboard` | 접속 여부와 무관한 전체 플레이어 상위 랭킹 조회 | 아니요 |
 | `GET` | `/api/health` | Redis 연결 상태 확인 | 아니요 |
 | `GET` | `/hello` | Redis 읽기·쓰기 데모 | 아니요 |
 | `GET` | `/counter` | 공용 카운터 증가 데모 | 아니요 |
 
-### 3.1. 플레이어 생성·복원
+### 3.1. 플레이어 생성·복원·닉네임 변경·새로 시작
+
+`GET /api/session`
+
+`200 OK`, `{"player": Player}`를 반환한다. 쿠키가 없거나 세션이 만료되었거나 해당 플레이어가 없으면 `{"player": null}`이다. 쿠키 발급·세션 연장·상태 변경을 하지 않으며 `Cache-Control: no-store`를 설정한다. Redis 실패는 `503` / `접속 기록 조회 실패`, 잘못된 플레이어 상태는 기존 `409` 코드 객체 형식을 사용한다.
 
 `POST /api/players`
 
@@ -117,10 +122,27 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 
 `nickname`은 필수 문자열이다. 양끝 공백 제거 후 길이가 1~20자여야 한다. 공백만 있는 값은 거절된다. 닉네임 중복 검사는 없으며, 중복 닉네임을 사용할 수 있다.
 
+| 본문 필드 | 값·의미 |
+| --- | --- |
+| `action` | 생략 시 `resume`. `resume`, `rename`, `restart`만 허용 |
+| `expected_player_id` | 확인창에 표시한 플레이어 ID. 선택 필드이며, `rename`·`restart`에서는 필수. 쿠키로 인증된 플레이어와 일치해야 함 |
+
+- `resume`: 기존 진행 상태와 닉네임을 유지한다. 유효한 기존 세션이 없고 `expected_player_id`도 생략했으면 신규 플레이어를 생성한다.
+- `rename`: 요청의 닉네임만 변경하고 골드·레벨·누적 클릭·생성 시각·토큰 버킷·랭킹 점수를 유지한다. 변경을 거절한 프론트엔드는 `resume`을 전송한다. 입력 닉네임이 기존 이름과 같으면 추가 변경 확인은 생략한다.
+- `restart`: 최종 초기화 확인 후 전송한다. 기존 플레이어 ID와 세션을 유지하면서 닉네임을 입력값으로 바꾸고, 골드 0·레벨 1·누적 클릭 0·생성 시각 현재·토큰 30개·랭킹 점수 0으로 초기화한다. 플레이어·버킷·랭킹·세션 연장은 Redis Lua에서 함께 처리한다. 다른 플레이어는 변경하지 않는다.
+- `expected_player_id`가 있으면 세션 만료·플레이어 누락·다른 계정으로 변경 시 새 플레이어로 대체하지 않고 `409` 문자열 오류를 반환한다. 프론트엔드는 입력 화면에서 기록을 다시 확인한다. `rename`·`restart`는 Lua 실행 시에도 세션 소유자를 재확인하며, 실패 시 상태를 변경하지 않는다.
+
+닉네임 변경 예:
+
+```json
+{"nickname":"새 닉네임","action":"rename","expected_player_id":"p0123456789abcdef0123456789abcdef"}
+```
+
 | 상황 | 상태 코드 | 처리 |
 | --- | --- | --- |
 | 사용 가능한 기존 세션 없음 | `201 Created` | 신규 플레이어 생성, 쿠키 발급 |
 | 기존 세션과 플레이어가 유효하고 세션 연장 성공 | `200 OK` | 기존 플레이어 반환, 쿠키와 세션 유효기간 갱신 |
+| `rename` 또는 `restart` 성공 | `200 OK` | `created: false`와 변경 후 `player`, 쿠키와 세션 유효기간 갱신 |
 
 신규 생성 응답:
 
@@ -141,7 +163,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 }
 ```
 
-복원 응답은 동일한 구조이며 `created`가 `false`이고 `player`는 기존 저장 상태이다. 복원 요청에서도 유효한 `nickname` 본문이 필수다. 복원 시 요청의 닉네임으로 기존 닉네임을 변경하지 않는다. 세션이 만료되었거나 연결된 플레이어가 없거나 세션 연장에 실패하면 신규 생성 경로로 진행한다.
+복원 응답은 동일한 구조이며 `created`가 `false`이고 `player`는 기존 저장 상태이다. 복원 요청에서도 유효한 `nickname` 본문이 필수다. 기본 `resume`에서는 요청의 닉네임으로 기존 닉네임을 변경하지 않는다. `expected_player_id` 없이 기본 복원한 경우에만 세션 만료·플레이어 누락·세션 연장 실패 시 신규 생성 경로로 진행한다.
 
 오류:
 
@@ -150,6 +172,7 @@ Player를 포함하는 HTTP 응답, WebSocket `connected.player`, 클릭·배치
 | `422` | 닉네임 누락, 타입·길이 오류, 잘못된 JSON 등 요청 검증 실패 |
 | `409` | `{"code":"INVALID_PLAYER_LEVEL"}`. 기존 세션의 플레이어 레벨 오류이며 새 플레이어로 대체하지 않음 |
 | `409` | `{"code":"NUMERIC_LIMIT_EXCEEDED"}`. 기존 플레이어의 표시값이 정확한 정수 표현 범위를 초과함 |
+| `409` | `접속 기록을 다시 확인해 주세요.`, `접속 기록이 변경되었습니다. 다시 확인해 주세요.`, `접속 기록이 만료되었습니다. 다시 확인해 주세요.` |
 | `500` | `생성된 플레이어를 조회할 수 없습니다.` |
 | `503` | `Redis 처리 실패` |
 
@@ -544,7 +567,7 @@ async function startGame(nickname: string) {
 - 다른 플레이어 및 내 다른 연결에서 성공한 동작의 골드 변경은 접속자 리더보드 방송에 반영된다. 다만 내 전체 Player 상태를 모든 탭에 방송하지는 않는다. 다른 탭의 레벨·누적 클릭 수까지 동기화하려면 플레이어 조회 또는 재연결의 `connected.player`로 확인한다.
 - 배치당 최대 10회 검증과 플레이어별 토큰 버킷 제한을 함께 적용한다. 단일 클릭도 동일한 제한을 사용한다. 성공한 클릭은 `app/repositories/scripts/click_batch.lua`에서 처리하며, `click.lua`는 현재 단일 클릭 API의 실행 경로가 아니다.
 - 요청 중복 방지·요청 ID·클라이언트별 처리 확인 번호는 제공하지 않는다. 결과를 받기 전에 연결이 끊기면 서버 상태를 확인한 뒤 후속 입력을 처리한다.
-- 로그아웃, 닉네임 변경, 플레이어 삭제, 내 정보 전용 조회, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다.
+- 로그아웃, 플레이어 삭제, 개인 순위 조회, HTTP 클릭·레벨업 엔드포인트는 구현되어 있지 않다. 저장소의 `get_player_rank()`는 외부 API로 노출되지 않는다. 쿠키 기반 내 기록 조회와 닉네임 변경·진행 초기화는 위의 세션 API를 사용한다.
 - 자동 문서 기본 경로는 `/docs`, `/redoc`, OpenAPI JSON은 `/openapi.json`이다. WebSocket 메시지 계약은 이 문서를 참고한다. 현재 HTTP 라우트에는 상세 응답 모델이 선언되어 있지 않다.
 
 확인한 구현 파일:
@@ -557,6 +580,7 @@ async function startGame(nickname: string) {
 - `app/repositories/repository.py`: 응답 데이터 변환, 세션 기간, 전체·접속자 랭킹 조회, 클릭 경로 및 버킷 충전 호출.
 - `app/balance.py`: Decimal 기반 레벨별 성장값 생성·캐시, 공통 응답 필드와 숫자 범위 확인, Lua 값 전달 지원.
 - `app/repositories/scripts/create_player.lua`, `click_batch.lua`, `levelup.lua`, `refill_buckets.lua`: 초기 상태, 클릭 제한, 게임 규칙, 토큰 충전.
+- `app/repositories/scripts/update_player_session.lua`: 세션 소유자 확인, 닉네임 변경 및 진행 상태 초기화.
 - `../frontend/src/game-service.ts`, `../frontend/vite.config.ts`: 현재 API 어댑터와 개발 서버 프록시 설정.
 
 성장 규칙은 `backend`에서 `.venv/Scripts/python.exe -B -m unittest discover -s tests -v`로 검증할 수 있다. 테스트는 기본적으로 로컬 Redis DB 15의 고유 테스트 키만 사용하고 정리하며, `REDIS_TEST_URL`로 테스트 접속 주소를 지정할 수 있다. 수식은 1~40레벨에서 독립적인 정확한 분수 계산과 비교하고, 실제 Redis/Lua 및 HTTP·WebSocket ASGI 경로로 39→40, 동시 레벨업 시 40 초과 방지, 만렙 클릭·배치 보상, 거절 시 상태 유지와 응답 일치를 검증한다.

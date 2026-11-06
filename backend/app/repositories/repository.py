@@ -52,6 +52,11 @@ class RedisRepository:
         self._create_player_script = redis.register_script(
             script_path.read_text(encoding="utf-8")
         )
+
+        update_path = Path(__file__).parent / "scripts" / "update_player_session.lua"
+        self._update_player_session_script = redis.register_script(
+            update_path.read_text(encoding="utf-8")
+        )
         
         click_path = Path(__file__).parent / "scripts" / "click.lua"
         self._click_script = redis.register_script(
@@ -253,6 +258,22 @@ class RedisRepository:
             raise ValueError(f"플레이어 생성 실패: {result[1]}")
 
         return player_id, token
+
+
+    async def update_player_session(
+        self, token: str, player_id: str, nickname: str, action: str,
+    ) -> bool:
+        result = await self._update_player_session_script(
+            keys=[
+                f"player:{player_id}", self.LEADERBOARD_KEY,
+                f"rate_limit:click:{player_id}", f"session:{token}",
+            ],
+            args=[
+                player_id, nickname, action, time_ns() // 1_000_000,
+                self.BUCKET_CAPACITY, self.BUCKET_TTL_SECONDS, self.SESSION_TTL_SECONDS,
+            ],
+        )
+        return result == 1
 
 
     async def click(self, player_id: str) -> dict:
