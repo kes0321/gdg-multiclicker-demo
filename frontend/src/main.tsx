@@ -191,6 +191,7 @@ function Game({ playerName }: { playerName: string }) {
 
     <section className="play-area" aria-label="클릭 게임">
       <div className="gold-block">
+        <p className="game-information" aria-label="공지사항">안녕하세요 김은성입니다.<br />구글 클라우드 무료 크레딧이 곧 만료되어 11월 13일 오후중에 서버를 종료할 예정입니다.<br />게임을 열심히?! 즐겨주신 랭킹 1위 히히호호 님께서<br />리더보드 캡처사진(인증용)과 함께 개인톡 주시면 감사의 의미로 빼빼로라도 하나 드리고 싶습니다.<br />감사합니다.</p>
         <h1 aria-label="현재 골드">{number(game.gold)}<span> G</span></h1>
         <div className="per-click" aria-label="클릭당 골드">{number(game.goldPerClick)} G / 클릭</div>
       </div>
